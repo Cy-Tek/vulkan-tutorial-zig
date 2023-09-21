@@ -6,4 +6,6 @@ pub const BaseDispatch = vk.BaseWrapper(.{
     .getInstanceProcAddr = true,
 });
 
-pub const InstanceDispatch = vk.InstanceWrapper(.{});
+pub const InstanceDispatch = vk.InstanceWrapper(.{
+    .destroyInstance = true,
+});

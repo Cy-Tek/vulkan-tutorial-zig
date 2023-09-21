@@ -9,7 +9,7 @@
             "type": "lldb",
             "request": "launch",
             "cwd": "${workspaceRoot}",
-            "program": "./zig-out/bin/hello-triangle-zig-vulkan.exe"
+            "program": "./zig-out/bin/hello-triangle-zig-vulkan"
         }
     ]
 }

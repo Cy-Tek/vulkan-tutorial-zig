@@ -48,6 +48,7 @@ pub const App = struct {
     }
 
     pub fn deinit(self: *Self) void {
+        self.vki.destroyInstance(self.instance, null);
         self.extensions.deinit();
         self.window.destroy();
         glfw.terminate();
@@ -79,27 +80,45 @@ pub const App = struct {
             break :blk error.code;
         };
 
-        if (builtin.mode == std.builtin.OptimizeMode.Debug) {
-            var property_count: u32 = 0;
-            _ = try self.vkb.enumerateInstanceExtensionProperties(null, &property_count, null);
-
-            var extension_properties = ArrayList(vk.ExtensionProperties).init(self.alloc);
-            try extension_properties.resize(property_count);
-            defer extension_properties.deinit();
-
-            _ = try self.vkb.enumerateInstanceExtensionProperties(null, &property_count, extension_properties.items.ptr);
-
-            for (extension_properties.items) |ext| {
-                std.debug.print("\nFound Extension: {s}", .{ext.extension_name});
-            }
-            std.debug.print("\n\n", .{});
-        }
-
         var all_extensions = std.ArrayList([*:0]const u8).init(self.alloc);
         try all_extensions.appendSlice(glfw_extensions);
 
         if (builtin.os.tag == .macos) {
             try all_extensions.append(vk.extension_info.khr_portability_enumeration.name);
+        }
+
+        if (builtin.mode == std.builtin.OptimizeMode.Debug) {
+            var property_count: u32 = 0;
+            var result = try self.vkb.enumerateInstanceExtensionProperties(null, &property_count, null);
+            if (result != .success) {
+                return error.Unknown;
+            }
+
+            var extension_properties = ArrayList(vk.ExtensionProperties).init(self.alloc);
+            try extension_properties.resize(property_count);
+            defer extension_properties.deinit();
+
+            result = try self.vkb.enumerateInstanceExtensionProperties(null, &property_count, extension_properties.items.ptr);
+            if (result != .success) {
+                return error.Unknown;
+            }
+
+            for (extension_properties.items) |ext| {
+                std.debug.print("\nFound Extension: {s}", .{ext.extension_name});
+            }
+            std.debug.print("\n\n", .{});
+
+            var count = all_extensions.items.len;
+            for (extension_properties.items) |found_ext| {
+                for (all_extensions.items) |required_ext| {
+                    if (strEql(&found_ext.extension_name, required_ext)) {
+                        count -= 1;
+                        break;
+                    }
+                }
+            }
+
+            try std.testing.expect(count == 0);
         }
 
         self.extensions = all_extensions;
@@ -132,3 +151,17 @@ pub const App = struct {
         self.vki = try InstanceDispatch.load(self.instance, self.vkb.dispatch.vkGetInstanceProcAddr);
     }
 };
+
+fn strEql(arr: []const u8, str: [*:0]const u8) bool {
+    for (arr, str) |c1, c2| {
+        if (c1 != c2) {
+            return false;
+        }
+
+        if (c1 == 0 or c2 == 0) {
+            break;
+        }
+    }
+
+    return true;
+}

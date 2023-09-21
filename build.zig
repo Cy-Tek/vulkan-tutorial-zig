@@ -16,9 +16,6 @@ pub fn build(b: *std.Build) void {
     // set a preferred release mode, allowing the user to decide how to optimize.
     const optimize = b.standardOptimizeOption(.{});
 
-    const vulkan_dep = b.dependency("vulkan", .{});
-    const vulkan_mod = vulkan_dep.module("vulkan-zig-generated");
-
     const glfw_dep = b.dependency("mach_glfw", .{ .target = target, .optimize = optimize });
     const glfw_mod = glfw_dep.module("mach-glfw");
 
@@ -33,7 +30,6 @@ pub fn build(b: *std.Build) void {
 
     exe.main_pkg_path = .{ .path = "." };
     try glfw.link(b, exe);
-    exe.addModule("vulkan", vulkan_mod);
     exe.addModule("glfw", glfw_mod);
 
     // This declares intent for the executable to be installed into the

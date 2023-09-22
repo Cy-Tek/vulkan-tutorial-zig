@@ -86,37 +86,40 @@ pub const App = struct {
             break :blk error.code;
         };
 
-        var all_extensions = std.ArrayList([*:0]const u8).init(self.alloc);
-        try all_extensions.appendSlice(glfw_extensions);
+        var required_extensions = std.ArrayList([*:0]const u8).init(self.alloc);
+        try required_extensions.appendSlice(glfw_extensions);
 
         if (builtin.os.tag == .macos) {
-            try all_extensions.append(vk.extension_info.khr_portability_enumeration.name);
+            try required_extensions.append(vk.extension_info.khr_portability_enumeration.name);
         }
 
         if (builtin.mode == std.builtin.OptimizeMode.Debug) {
             var property_count: u32 = 0;
             var result = try self.vkb.enumerateInstanceExtensionProperties(null, &property_count, null);
             if (result != .success) {
-                return error.Unknown;
+                std.log.err("Failed to enumerate instance extension properties", .{});
+                return error.EnumerationFailed;
             }
 
+            // Create the buffer to store the supported instance extension properties
             var extension_properties = ArrayList(vk.ExtensionProperties).init(self.alloc);
             try extension_properties.resize(property_count);
             defer extension_properties.deinit();
 
             result = try self.vkb.enumerateInstanceExtensionProperties(null, &property_count, extension_properties.items.ptr);
             if (result != .success) {
-                return error.Unknown;
+                std.log.err("Failed to enumerate instance extension properties", .{});
+                return error.EnumerationFailed;
             }
 
             for (extension_properties.items) |ext| {
-                std.debug.print("\nFound Extension: {s}", .{ext.extension_name});
+                std.log.debug("Available Extension: {s}", .{ext.extension_name});
             }
-            std.debug.print("\n\n", .{});
 
-            var count = all_extensions.items.len;
+            // Ensure that all of the required extensions are supported
+            var count = required_extensions.items.len;
             for (extension_properties.items) |found_ext| {
-                for (all_extensions.items) |required_ext| {
+                for (required_extensions.items) |required_ext| {
                     if (strEql(&found_ext.extension_name, required_ext)) {
                         count -= 1;
                         break;
@@ -124,10 +127,13 @@ pub const App = struct {
                 }
             }
 
-            try std.testing.expect(count == 0);
+            if (count > 0) {
+                std.log.err("Failed to find {} required extensions.", .{count});
+                return error.ExtensionNotPresent;
+            }
         }
 
-        self.extensions = all_extensions;
+        self.extensions = required_extensions;
     }
 
     fn createInstance(self: *Self) !void {
@@ -148,8 +154,8 @@ pub const App = struct {
         };
 
         if (builtin.mode == std.builtin.OptimizeMode.Debug) {
-            for (self.extensions.items) |ext| {
-                std.debug.print("Extension Required: {s}\n", .{ext});
+            for (self.extensions.items, 0..) |ext, i| {
+                std.log.debug("Required Extension {}: {s}", .{ i, ext });
             }
 
             if (!(try checkValidationLayerSupport(self))) {
@@ -166,13 +172,21 @@ pub const App = struct {
 
     fn checkValidationLayerSupport(self: *Self) !bool {
         var layer_count: u32 = undefined;
-        _ = try self.vkb.enumerateInstanceLayerProperties(&layer_count, null);
+        var result = try self.vkb.enumerateInstanceLayerProperties(&layer_count, null);
+        if (result != .success) {
+            std.log.err("Failed to enumerate instance layer properties", .{});
+            return error.EnumerationFailed;
+        }
 
         var available_layers = std.ArrayList(vk.LayerProperties).init(self.alloc);
         defer available_layers.deinit();
 
         try available_layers.resize(layer_count);
-        _ = try self.vkb.enumerateInstanceLayerProperties(&layer_count, available_layers.items.ptr);
+        result = try self.vkb.enumerateInstanceLayerProperties(&layer_count, available_layers.items.ptr);
+        if (result != .success) {
+            std.log.err("Failed to enumerate instance layer properties", .{});
+            return error.EnumerationFailed;
+        }
 
         for (validation_layers) |layer_name| {
             var layer_found = false;

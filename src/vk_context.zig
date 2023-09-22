@@ -9,4 +9,6 @@ pub const BaseDispatch = vk.BaseWrapper(.{
 
 pub const InstanceDispatch = vk.InstanceWrapper(.{
     .destroyInstance = true,
+    .createDebugUtilsMessengerEXT = true,
+    .destroyDebugUtilsMessengerEXT = true,
 });

@@ -21,14 +21,15 @@ const validation_layers = [_][*:0]const u8{
 pub const App = struct {
     const Self = @This();
 
-    window: glfw.Window,
     alloc: Allocator,
+    window: glfw.Window,
 
-    instance: vk.Instance,
-    extensions: ArrayList([*:0]const u8),
+    vkb: BaseDispatch = undefined,
+    vki: InstanceDispatch = undefined,
 
-    vkb: BaseDispatch,
-    vki: InstanceDispatch,
+    instance: vk.Instance = undefined,
+    extensions: ArrayList([*:0]const u8) = undefined,
+    debug_messenger: vk.DebugUtilsMessengerEXT = undefined,
 
     pub fn init(alloc: Allocator) !App {
         var window = try initWindow();
@@ -43,9 +44,6 @@ pub const App = struct {
             .alloc = alloc,
             .window = window,
             .vkb = base_dispatch,
-            .vki = undefined,
-            .extensions = undefined,
-            .instance = undefined,
         };
 
         try app.initVulkan();
@@ -54,6 +52,7 @@ pub const App = struct {
     }
 
     pub fn deinit(self: *Self) void {
+        self.vki.destroyDebugUtilsMessengerEXT(self.instance, self.debug_messenger, null);
         self.vki.destroyInstance(self.instance, null);
         self.extensions.deinit();
 
@@ -77,6 +76,47 @@ pub const App = struct {
     fn initVulkan(self: *Self) !void {
         try self.getRequiredExtensions();
         try self.createInstance();
+
+        if (builtin.mode == std.builtin.OptimizeMode.Debug) {
+            try self.setupDebugMessenger();
+        }
+    }
+
+    fn createInstance(self: *Self) !void {
+        const app_info = vk.ApplicationInfo{
+            .p_application_name = "Hello Triangle",
+            .application_version = vk.makeApiVersion(0, 1, 3, 0),
+            .p_engine_name = "No Engine",
+            .engine_version = vk.makeApiVersion(0, 1, 3, 0),
+            .api_version = vk.makeApiVersion(0, 1, 3, 0),
+        };
+
+        var create_info = vk.InstanceCreateInfo{
+            .p_application_info = &app_info,
+            .enabled_extension_count = @intCast(self.extensions.items.len),
+            .pp_enabled_extension_names = self.extensions.items.ptr,
+            .enabled_layer_count = 0,
+            .flags = .{ .enumerate_portability_bit_khr = true },
+            .p_next = null,
+        };
+
+        if (builtin.mode == std.builtin.OptimizeMode.Debug) {
+            const debug_create_info = createDebugMessengerCreateInfo();
+            for (self.extensions.items, 0..) |ext, i| {
+                std.log.debug("Required Extension {}: {s}", .{ i, ext });
+            }
+
+            if (!(try checkValidationLayerSupport(self))) {
+                return error.LayerNotPresent;
+            }
+
+            create_info.enabled_layer_count = @intCast(validation_layers.len);
+            create_info.pp_enabled_layer_names = &validation_layers;
+            create_info.p_next = &debug_create_info;
+        }
+
+        self.instance = try self.vkb.createInstance(&create_info, null);
+        self.vki = try InstanceDispatch.load(self.instance, self.vkb.dispatch.vkGetInstanceProcAddr);
     }
 
     fn getRequiredExtensions(self: *Self) !void {
@@ -94,6 +134,8 @@ pub const App = struct {
         }
 
         if (builtin.mode == std.builtin.OptimizeMode.Debug) {
+            try required_extensions.append(vk.extension_info.ext_debug_utils.name);
+
             var property_count: u32 = 0;
             var result = try self.vkb.enumerateInstanceExtensionProperties(null, &property_count, null);
             if (result != .success) {
@@ -136,40 +178,6 @@ pub const App = struct {
         self.extensions = required_extensions;
     }
 
-    fn createInstance(self: *Self) !void {
-        const app_info = vk.ApplicationInfo{
-            .p_application_name = "Hello Triangle",
-            .application_version = vk.makeApiVersion(0, 1, 3, 0),
-            .p_engine_name = "No Engine",
-            .engine_version = vk.makeApiVersion(0, 1, 3, 0),
-            .api_version = vk.makeApiVersion(0, 1, 3, 0),
-        };
-
-        var create_info = vk.InstanceCreateInfo{
-            .p_application_info = &app_info,
-            .enabled_extension_count = @intCast(self.extensions.items.len),
-            .pp_enabled_extension_names = self.extensions.items.ptr,
-            .enabled_layer_count = 0,
-            .flags = .{ .enumerate_portability_bit_khr = true },
-        };
-
-        if (builtin.mode == std.builtin.OptimizeMode.Debug) {
-            for (self.extensions.items, 0..) |ext, i| {
-                std.log.debug("Required Extension {}: {s}", .{ i, ext });
-            }
-
-            if (!(try checkValidationLayerSupport(self))) {
-                return error.LayerNotPresent;
-            }
-
-            create_info.enabled_layer_count = @intCast(validation_layers.len);
-            create_info.pp_enabled_layer_names = &validation_layers;
-        }
-
-        self.instance = try self.vkb.createInstance(&create_info, null);
-        self.vki = try InstanceDispatch.load(self.instance, self.vkb.dispatch.vkGetInstanceProcAddr);
-    }
-
     fn checkValidationLayerSupport(self: *Self) !bool {
         var layer_count: u32 = undefined;
         var result = try self.vkb.enumerateInstanceLayerProperties(&layer_count, null);
@@ -205,13 +213,46 @@ pub const App = struct {
 
         return true;
     }
+
+    fn setupDebugMessenger(self: *Self) !void {
+        const create_info = createDebugMessengerCreateInfo();
+        self.debug_messenger = try self.vki.createDebugUtilsMessengerEXT(self.instance, &create_info, null);
+    }
 };
+
+fn createDebugMessengerCreateInfo() vk.DebugUtilsMessengerCreateInfoEXT {
+    return .{
+        .message_severity = .{ .verbose_bit_ext = true, .error_bit_ext = true, .warning_bit_ext = true },
+        .message_type = .{ .general_bit_ext = true, .validation_bit_ext = true, .performance_bit_ext = true },
+        .pfn_user_callback = &debugCallback,
+    };
+}
+
+fn debugCallback(
+    message_severity: vk.DebugUtilsMessageSeverityFlagsEXT,
+    message_type: vk.DebugUtilsMessageTypeFlagsEXT,
+    p_callback_data: ?*const vk.DebugUtilsMessengerCallbackDataEXT,
+    p_user_data: ?*anyopaque,
+) callconv(vk.vulkan_call_conv) vk.Bool32 {
+    _ = p_user_data;
+    _ = message_type;
+    _ = message_severity;
+
+    if (p_callback_data) |data| {
+        std.log.debug("{s}", .{data.p_message});
+    }
+
+    return vk.TRUE;
+}
 
 fn deinitGlfw(window: *glfw.Window) void {
     window.destroy();
     glfw.terminate();
 }
 
+// This is a weird hack to handle the fact that many vulkan names are pre-allocated
+// arrays of length 256. This allows us to test against them with a standard C-style
+// char ptr.
 fn strEql(arr: []const u8, str: [*:0]const u8) bool {
     for (arr, str) |c1, c2| {
         if (c1 != c2) return false;

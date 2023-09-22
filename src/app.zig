@@ -14,6 +14,10 @@ const InstanceDispatch = vk_ctx.InstanceDispatch;
 const width = 800;
 const height = 600;
 
+const validation_layers = [_][*:0]const u8{
+    "VK_LAYER_KHRONOS_validation",
+};
+
 pub const App = struct {
     const Self = @This();
 
@@ -27,7 +31,9 @@ pub const App = struct {
     vki: InstanceDispatch,
 
     pub fn init(alloc: Allocator) !App {
-        const window = try initWindow();
+        var window = try initWindow();
+        errdefer deinitGlfw(&window);
+
         const base_dispatch = try BaseDispatch.load(@as(
             vk.PfnGetInstanceProcAddr,
             @ptrCast(&glfw.getInstanceProcAddress),
@@ -50,8 +56,8 @@ pub const App = struct {
     pub fn deinit(self: *Self) void {
         self.vki.destroyInstance(self.instance, null);
         self.extensions.deinit();
-        self.window.destroy();
-        glfw.terminate();
+
+        deinitGlfw(&self.window);
     }
 
     pub fn run(self: *Self) !void {
@@ -133,13 +139,7 @@ pub const App = struct {
             .api_version = vk.makeApiVersion(0, 1, 3, 0),
         };
 
-        if (builtin.mode == std.builtin.OptimizeMode.Debug) {
-            for (self.extensions.items) |ext| {
-                std.debug.print("Extension Required: {s}\n", .{ext});
-            }
-        }
-
-        const create_info = vk.InstanceCreateInfo{
+        var create_info = vk.InstanceCreateInfo{
             .p_application_info = &app_info,
             .enabled_extension_count = @intCast(self.extensions.items.len),
             .pp_enabled_extension_names = self.extensions.items.ptr,
@@ -147,20 +147,61 @@ pub const App = struct {
             .flags = .{ .enumerate_portability_bit_khr = true },
         };
 
+        if (builtin.mode == std.builtin.OptimizeMode.Debug) {
+            for (self.extensions.items) |ext| {
+                std.debug.print("Extension Required: {s}\n", .{ext});
+            }
+
+            if (!(try checkValidationLayerSupport(self))) {
+                return error.LayerNotPresent;
+            }
+
+            create_info.enabled_layer_count = @intCast(validation_layers.len);
+            create_info.pp_enabled_layer_names = &validation_layers;
+        }
+
         self.instance = try self.vkb.createInstance(&create_info, null);
         self.vki = try InstanceDispatch.load(self.instance, self.vkb.dispatch.vkGetInstanceProcAddr);
     }
+
+    fn checkValidationLayerSupport(self: *Self) !bool {
+        var layer_count: u32 = undefined;
+        _ = try self.vkb.enumerateInstanceLayerProperties(&layer_count, null);
+
+        var available_layers = std.ArrayList(vk.LayerProperties).init(self.alloc);
+        defer available_layers.deinit();
+
+        try available_layers.resize(layer_count);
+        _ = try self.vkb.enumerateInstanceLayerProperties(&layer_count, available_layers.items.ptr);
+
+        for (validation_layers) |layer_name| {
+            var layer_found = false;
+
+            for (available_layers.items) |layer_properties| {
+                if (strEql(&layer_properties.layer_name, layer_name)) {
+                    layer_found = true;
+                    break;
+                }
+            }
+
+            if (!layer_found) {
+                return false;
+            }
+        }
+
+        return true;
+    }
 };
+
+fn deinitGlfw(window: *glfw.Window) void {
+    window.destroy();
+    glfw.terminate();
+}
 
 fn strEql(arr: []const u8, str: [*:0]const u8) bool {
     for (arr, str) |c1, c2| {
-        if (c1 != c2) {
-            return false;
-        }
-
-        if (c1 == 0 or c2 == 0) {
-            break;
-        }
+        if (c1 != c2) return false;
+        if (c1 == 0 or c2 == 0) break;
     }
 
     return true;

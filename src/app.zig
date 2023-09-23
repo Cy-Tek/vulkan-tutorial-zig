@@ -8,6 +8,7 @@ const Hints = glfw.Window.Hints;
 
 const vk = @import("vk.zig");
 const vk_ctx = @import("vk_context.zig");
+const VkAssert = vk_ctx.VkAssert;
 const BaseDispatch = vk_ctx.BaseDispatch;
 const InstanceDispatch = vk_ctx.InstanceDispatch;
 
@@ -21,7 +22,7 @@ const validation_layers = [_][*:0]const u8{
 pub const App = struct {
     const Self = @This();
 
-    alloc: Allocator,
+    allocator: Allocator,
     window: glfw.Window,
 
     vkb: BaseDispatch = undefined,
@@ -30,6 +31,7 @@ pub const App = struct {
     instance: vk.Instance = undefined,
     extensions: ArrayList([*:0]const u8) = undefined,
     debug_messenger: vk.DebugUtilsMessengerEXT = undefined,
+    physical_device: vk.PhysicalDevice = .null_handle,
 
     pub fn init(alloc: Allocator) !App {
         var window = try initWindow();
@@ -41,7 +43,7 @@ pub const App = struct {
         ));
 
         var app = App{
-            .alloc = alloc,
+            .allocator = alloc,
             .window = window,
             .vkb = base_dispatch,
         };
@@ -80,6 +82,8 @@ pub const App = struct {
         if (builtin.mode == std.builtin.OptimizeMode.Debug) {
             try self.setupDebugMessenger();
         }
+
+        try self.pickPhysicalDevice();
     }
 
     fn createInstance(self: *Self) !void {
@@ -119,6 +123,29 @@ pub const App = struct {
         self.vki = try InstanceDispatch.load(self.instance, self.vkb.dispatch.vkGetInstanceProcAddr);
     }
 
+    fn pickPhysicalDevice(self: *Self) !void {
+        var device_count: u32 = undefined;
+        var result = try self.vki.enumeratePhysicalDevices(self.instance, &device_count, null);
+        try VkAssert.withMessage(result, "Failed to find a GPU with Vulkan support.");
+
+        var devices = try self.allocator.alloc(vk.PhysicalDevice, device_count);
+        defer self.allocator.free(devices);
+
+        result = try self.vki.enumeratePhysicalDevices(self.instance, &device_count, devices.ptr);
+        try VkAssert.withMessage(result, "Failed to find a GPU with Vulkan support.");
+
+        for (devices) |device| {
+            if (try isDeviceSuitable(device, &self.vki)) {
+                self.physical_device = device;
+                break;
+            }
+        }
+
+        if (self.physical_device == .null_handle) {
+            return error.NoSuitableGPU;
+        }
+    }
+
     fn getRequiredExtensions(self: *Self) !void {
         const glfw_extensions = glfw.getRequiredInstanceExtensions() orelse return blk: {
             const err = glfw.mustGetError();
@@ -126,7 +153,7 @@ pub const App = struct {
             break :blk error.code;
         };
 
-        var required_extensions = std.ArrayList([*:0]const u8).init(self.alloc);
+        var required_extensions = std.ArrayList([*:0]const u8).init(self.allocator);
         try required_extensions.appendSlice(glfw_extensions);
 
         if (builtin.os.tag == .macos) {
@@ -136,31 +163,24 @@ pub const App = struct {
         if (builtin.mode == std.builtin.OptimizeMode.Debug) {
             try required_extensions.append(vk.extension_info.ext_debug_utils.name);
 
-            var property_count: u32 = 0;
+            var property_count: u32 = undefined;
             var result = try self.vkb.enumerateInstanceExtensionProperties(null, &property_count, null);
-            if (result != .success) {
-                std.log.err("Failed to enumerate instance extension properties", .{});
-                return error.EnumerationFailed;
-            }
+            try VkAssert.withMessage(result, "Failed to enumerate instance extension properties");
 
             // Create the buffer to store the supported instance extension properties
-            var extension_properties = ArrayList(vk.ExtensionProperties).init(self.alloc);
-            try extension_properties.resize(property_count);
-            defer extension_properties.deinit();
+            var extension_properties = try self.allocator.alloc(vk.ExtensionProperties, property_count);
+            defer self.allocator.free(extension_properties);
 
-            result = try self.vkb.enumerateInstanceExtensionProperties(null, &property_count, extension_properties.items.ptr);
-            if (result != .success) {
-                std.log.err("Failed to enumerate instance extension properties", .{});
-                return error.EnumerationFailed;
-            }
+            result = try self.vkb.enumerateInstanceExtensionProperties(null, &property_count, extension_properties.ptr);
+            try VkAssert.withMessage(result, "Failed to enumerate instance extension properties");
 
-            for (extension_properties.items) |ext| {
+            for (extension_properties) |ext| {
                 std.log.debug("Available Extension: {s}", .{ext.extension_name});
             }
 
             // Ensure that all of the required extensions are supported
             var count = required_extensions.items.len;
-            for (extension_properties.items) |found_ext| {
+            for (extension_properties) |found_ext| {
                 for (required_extensions.items) |required_ext| {
                     if (strEql(&found_ext.extension_name, required_ext)) {
                         count -= 1;
@@ -181,25 +201,18 @@ pub const App = struct {
     fn checkValidationLayerSupport(self: *Self) !bool {
         var layer_count: u32 = undefined;
         var result = try self.vkb.enumerateInstanceLayerProperties(&layer_count, null);
-        if (result != .success) {
-            std.log.err("Failed to enumerate instance layer properties", .{});
-            return error.EnumerationFailed;
-        }
+        try VkAssert.withMessage(result, "Failed to enumerate instance layer properties.");
 
-        var available_layers = std.ArrayList(vk.LayerProperties).init(self.alloc);
-        defer available_layers.deinit();
+        var available_layers = try self.allocator.alloc(vk.LayerProperties, layer_count);
+        defer self.allocator.free(available_layers);
 
-        try available_layers.resize(layer_count);
-        result = try self.vkb.enumerateInstanceLayerProperties(&layer_count, available_layers.items.ptr);
-        if (result != .success) {
-            std.log.err("Failed to enumerate instance layer properties", .{});
-            return error.EnumerationFailed;
-        }
+        result = try self.vkb.enumerateInstanceLayerProperties(&layer_count, available_layers.ptr);
+        try VkAssert.withMessage(result, "Failed to enumerate instance layer properties.");
 
         for (validation_layers) |layer_name| {
             var layer_found = false;
 
-            for (available_layers.items) |layer_properties| {
+            for (available_layers) |layer_properties| {
                 if (strEql(&layer_properties.layer_name, layer_name)) {
                     layer_found = true;
                     break;
@@ -219,6 +232,12 @@ pub const App = struct {
         self.debug_messenger = try self.vki.createDebugUtilsMessengerEXT(self.instance, &create_info, null);
     }
 };
+
+fn isDeviceSuitable(device: vk.PhysicalDevice, dispatch: *InstanceDispatch) !bool {
+    _ = dispatch;
+    _ = device;
+    return true; // At this point we don't care as long as it supports Vulkan at all
+}
 
 fn createDebugMessengerCreateInfo() vk.DebugUtilsMessengerCreateInfoEXT {
     return .{

@@ -34,4 +34,5 @@ pub const InstanceDispatch = vk.InstanceWrapper(.{
     .enumeratePhysicalDevices = true,
     .getPhysicalDeviceProperties = true,
     .getPhysicalDeviceFeatures = true,
+    .getPhysicalDeviceQueueFamilyProperties = true,
 });

@@ -19,6 +19,16 @@ const validation_layers = [_][*:0]const u8{
     "VK_LAYER_KHRONOS_validation",
 };
 
+const QueueFamilyIndices = struct {
+    const Self = @This();
+
+    graphics_family: ?u32 = null,
+
+    pub fn isComplete(self: Self) bool {
+        return self.graphics_family != null;
+    }
+};
+
 pub const App = struct {
     const Self = @This();
 
@@ -135,7 +145,7 @@ pub const App = struct {
         try VkAssert.withMessage(result, "Failed to find a GPU with Vulkan support.");
 
         for (devices) |device| {
-            if (try isDeviceSuitable(device, &self.vki)) {
+            if (try self.isDeviceSuitable(device)) {
                 self.physical_device = device;
                 break;
             }
@@ -144,6 +154,34 @@ pub const App = struct {
         if (self.physical_device == .null_handle) {
             return error.NoSuitableGPU;
         }
+    }
+
+    fn findQueueFamilies(self: *Self, physical_device: vk.PhysicalDevice) !QueueFamilyIndices {
+        var indices = QueueFamilyIndices{};
+
+        var queue_family_count: u32 = undefined;
+        self.vki.getPhysicalDeviceQueueFamilyProperties(physical_device, &queue_family_count, null);
+
+        var queue_families: []vk.QueueFamilyProperties = try self.allocator.alloc(vk.QueueFamilyProperties, queue_family_count);
+        defer self.allocator.free(queue_families);
+        self.vki.getPhysicalDeviceQueueFamilyProperties(physical_device, &queue_family_count, queue_families.ptr);
+
+        for (queue_families, 0..) |queue_family, i| {
+            if (queue_family.queue_flags.graphics_bit) {
+                indices.graphics_family = @intCast(i);
+            }
+
+            if (indices.isComplete()) {
+                break;
+            }
+        }
+
+        return indices;
+    }
+
+    fn isDeviceSuitable(self: *Self, device: vk.PhysicalDevice) !bool {
+        var indices = try self.findQueueFamilies(device);
+        return indices.isComplete();
     }
 
     fn getRequiredExtensions(self: *Self) !void {
@@ -232,12 +270,6 @@ pub const App = struct {
         self.debug_messenger = try self.vki.createDebugUtilsMessengerEXT(self.instance, &create_info, null);
     }
 };
-
-fn isDeviceSuitable(device: vk.PhysicalDevice, dispatch: *InstanceDispatch) !bool {
-    _ = dispatch;
-    _ = device;
-    return true; // At this point we don't care as long as it supports Vulkan at all
-}
 
 fn createDebugMessengerCreateInfo() vk.DebugUtilsMessengerCreateInfoEXT {
     return .{

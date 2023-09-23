@@ -32,9 +32,10 @@ const QueueFamilyIndices = struct {
     const Self = @This();
 
     graphics_family: ?u32 = null,
+    present_family: ?u32 = null,
 
     pub fn isComplete(self: Self) bool {
-        return self.graphics_family != null;
+        return self.graphics_family != null and self.present_family != null;
     }
 };
 
@@ -55,10 +56,15 @@ pub const App = struct {
     physical_device: vk.PhysicalDevice = .null_handle,
     device: vk.Device = .null_handle,
     graphics_queue: vk.Queue = .null_handle,
+    present_queue: vk.Queue = .null_handle,
+    surface: vk.SurfaceKHR = .null_handle,
 
     pub fn init(alloc: Allocator) !App {
         var window = try initWindow();
-        errdefer deinitGlfw(&window);
+        errdefer {
+            window.destroy();
+            glfw.terminate();
+        }
 
         const base_dispatch = try BaseDispatch.load(@as(
             vk.PfnGetInstanceProcAddr,
@@ -77,12 +83,20 @@ pub const App = struct {
     }
 
     pub fn deinit(self: *Self) void {
+        // Device level cleanup
         self.vkd.destroyDevice(self.device, null);
-        self.vki.destroyDebugUtilsMessengerEXT(self.instance, self.debug_messenger, null);
-        self.vki.destroyInstance(self.instance, null);
-        self.extensions.deinit();
 
-        deinitGlfw(&self.window);
+        // Instance level cleanup
+        self.vki.destroyDebugUtilsMessengerEXT(self.instance, self.debug_messenger, null);
+        self.vki.destroySurfaceKHR(self.instance, self.surface, null);
+        self.vki.destroyInstance(self.instance, null);
+
+        // GLFW cleanup
+        self.window.destroy();
+        glfw.terminate();
+
+        // Struct level cleanup
+        self.extensions.deinit();
     }
 
     pub fn run(self: *Self) !void {
@@ -106,6 +120,8 @@ pub const App = struct {
         if (builtin.mode == std.builtin.OptimizeMode.Debug) {
             try self.setupDebugMessenger();
         }
+
+        try self.createSurface();
 
         try self.pickPhysicalDevice();
         try self.createLogicalDevice();
@@ -148,6 +164,11 @@ pub const App = struct {
         self.vki = try InstanceDispatch.load(self.instance, self.vkb.dispatch.vkGetInstanceProcAddr);
     }
 
+    fn createSurface(self: *Self) !void {
+        var result = glfw.createWindowSurface(self.instance, self.window, null, &self.surface);
+        try VkAssert.withMessage(@enumFromInt(result), "Failed to create window surface");
+    }
+
     fn pickPhysicalDevice(self: *Self) !void {
         var device_count: u32 = undefined;
         var result = try self.vki.enumeratePhysicalDevices(self.instance, &device_count, null);
@@ -175,17 +196,27 @@ pub const App = struct {
         const indices = try self.findQueueFamilies(self.physical_device);
         const queue_priority: f32 = 1.0;
 
-        var queue_create_info = vk.DeviceQueueCreateInfo{
-            .queue_family_index = indices.graphics_family.?,
-            .queue_count = 1,
-            .p_queue_priorities = @ptrCast(&queue_priority),
-        };
+        var unique_queue_families = std.AutoArrayHashMap(u32, void).init(self.allocator);
+        defer unique_queue_families.deinit();
+
+        try unique_queue_families.put(indices.graphics_family.?, {});
+        try unique_queue_families.put(indices.present_family.?, {});
+
+        var queue_create_infos = try self.allocator.alloc(vk.DeviceQueueCreateInfo, unique_queue_families.count());
+        defer self.allocator.free(queue_create_infos);
+
+        for (unique_queue_families.keys(), 0..) |queue_family, i| {
+            queue_create_infos[i] = vk.DeviceQueueCreateInfo{
+                .queue_family_index = queue_family,
+                .queue_count = 1,
+                .p_queue_priorities = @ptrCast(&queue_priority),
+            };
+        }
 
         const device_features = vk.PhysicalDeviceFeatures{};
-
         var create_info = vk.DeviceCreateInfo{
-            .p_queue_create_infos = @ptrCast(&queue_create_info),
-            .queue_create_info_count = 1,
+            .p_queue_create_infos = queue_create_infos.ptr,
+            .queue_create_info_count = @intCast(queue_create_infos.len),
             .p_enabled_features = &device_features,
             .enabled_extension_count = 0,
         };
@@ -206,6 +237,7 @@ pub const App = struct {
         self.vkd = try DeviceDispatch.load(self.device, self.vki.dispatch.vkGetDeviceProcAddr);
 
         self.graphics_queue = self.vkd.getDeviceQueue(self.device, indices.graphics_family.?, 0);
+        self.present_queue = self.vkd.getDeviceQueue(self.device, indices.present_family.?, 0);
     }
 
     fn findQueueFamilies(self: *Self, physical_device: vk.PhysicalDevice) !QueueFamilyIndices {
@@ -225,6 +257,10 @@ pub const App = struct {
 
             if (indices.isComplete()) {
                 break;
+            }
+
+            if (try self.vki.getPhysicalDeviceSurfaceSupportKHR(physical_device, @intCast(i), self.surface) == vk.TRUE) {
+                indices.present_family = @intCast(i);
             }
         }
 
@@ -346,11 +382,6 @@ fn debugCallback(
     }
 
     return vk.TRUE;
-}
-
-fn deinitGlfw(window: *glfw.Window) void {
-    window.destroy();
-    glfw.terminate();
 }
 
 // This is a weird hack to handle the fact that many vulkan names are pre-allocated

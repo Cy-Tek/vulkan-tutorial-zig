@@ -31,10 +31,12 @@ pub const InstanceDispatch = vk.InstanceWrapper(.{
     .destroyInstance = true,
     .createDebugUtilsMessengerEXT = true,
     .destroyDebugUtilsMessengerEXT = true,
+    .destroySurfaceKHR = true,
     .enumeratePhysicalDevices = true,
     .getPhysicalDeviceProperties = true,
     .getPhysicalDeviceFeatures = true,
     .getPhysicalDeviceQueueFamilyProperties = true,
+    .getPhysicalDeviceSurfaceSupportKHR = true,
     .createDevice = true,
     .getDeviceProcAddr = true,
 });

@@ -204,6 +204,8 @@ pub const App = struct {
 
         self.device = try self.vki.createDevice(self.physical_device, &create_info, null);
         self.vkd = try DeviceDispatch.load(self.device, self.vki.dispatch.vkGetDeviceProcAddr);
+
+        self.graphics_queue = self.vkd.getDeviceQueue(self.device, indices.graphics_family.?, 0);
     }
 
     fn findQueueFamilies(self: *Self, physical_device: vk.PhysicalDevice) !QueueFamilyIndices {

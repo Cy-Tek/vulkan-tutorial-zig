@@ -11,12 +11,21 @@ const vk_ctx = @import("vk_context.zig");
 const VkAssert = vk_ctx.VkAssert;
 const BaseDispatch = vk_ctx.BaseDispatch;
 const InstanceDispatch = vk_ctx.InstanceDispatch;
+const DeviceDispatch = vk_ctx.DeviceDispatch;
 
 const width = 800;
 const height = 600;
 
 const validation_layers = [_][*:0]const u8{
     "VK_LAYER_KHRONOS_validation",
+};
+
+const mac_instance_extensions = [_][*:0]const u8{
+    vk.extension_info.khr_portability_enumeration.name,
+};
+
+const mac_device_extensions = [_][*:0]const u8{
+    vk.extension_info.khr_portability_subset.name,
 };
 
 const QueueFamilyIndices = struct {
@@ -37,11 +46,13 @@ pub const App = struct {
 
     vkb: BaseDispatch = undefined,
     vki: InstanceDispatch = undefined,
+    vkd: DeviceDispatch = undefined,
 
     instance: vk.Instance = undefined,
     extensions: ArrayList([*:0]const u8) = undefined,
     debug_messenger: vk.DebugUtilsMessengerEXT = undefined,
     physical_device: vk.PhysicalDevice = .null_handle,
+    device: vk.Device = .null_handle,
 
     pub fn init(alloc: Allocator) !App {
         var window = try initWindow();
@@ -64,6 +75,7 @@ pub const App = struct {
     }
 
     pub fn deinit(self: *Self) void {
+        self.vkd.destroyDevice(self.device, null);
         self.vki.destroyDebugUtilsMessengerEXT(self.instance, self.debug_messenger, null);
         self.vki.destroyInstance(self.instance, null);
         self.extensions.deinit();
@@ -94,6 +106,7 @@ pub const App = struct {
         }
 
         try self.pickPhysicalDevice();
+        try self.createLogicalDevice();
     }
 
     fn createInstance(self: *Self) !void {
@@ -117,7 +130,7 @@ pub const App = struct {
         if (builtin.mode == std.builtin.OptimizeMode.Debug) {
             const debug_create_info = createDebugMessengerCreateInfo();
             for (self.extensions.items, 0..) |ext, i| {
-                std.log.debug("Required Extension {}: {s}", .{ i, ext });
+                std.log.debug("Required Instance Extension {}: {s}", .{ i, ext });
             }
 
             if (!(try checkValidationLayerSupport(self))) {
@@ -154,6 +167,41 @@ pub const App = struct {
         if (self.physical_device == .null_handle) {
             return error.NoSuitableGPU;
         }
+    }
+
+    fn createLogicalDevice(self: *Self) !void {
+        const indices = try self.findQueueFamilies(self.physical_device);
+        const queue_priority: f32 = 1.0;
+
+        var queue_create_info = vk.DeviceQueueCreateInfo{
+            .queue_family_index = indices.graphics_family.?,
+            .queue_count = 1,
+            .p_queue_priorities = @ptrCast(&queue_priority),
+        };
+
+        const device_features = vk.PhysicalDeviceFeatures{};
+
+        var create_info = vk.DeviceCreateInfo{
+            .p_queue_create_infos = @ptrCast(&queue_create_info),
+            .queue_create_info_count = 1,
+            .p_enabled_features = &device_features,
+            .enabled_extension_count = 0,
+        };
+
+        if (builtin.mode == std.builtin.OptimizeMode.Debug) {
+            create_info.enabled_layer_count = @intCast(validation_layers.len);
+            create_info.pp_enabled_layer_names = &validation_layers;
+        } else {
+            create_info.enabled_layer_count = 0;
+        }
+
+        if (builtin.os.tag == .macos) {
+            create_info.enabled_extension_count = @intCast(mac_device_extensions.len);
+            create_info.pp_enabled_extension_names = &mac_device_extensions;
+        }
+
+        self.device = try self.vki.createDevice(self.physical_device, &create_info, null);
+        self.vkd = try DeviceDispatch.load(self.device, self.vki.dispatch.vkGetDeviceProcAddr);
     }
 
     fn findQueueFamilies(self: *Self, physical_device: vk.PhysicalDevice) !QueueFamilyIndices {
@@ -195,7 +243,7 @@ pub const App = struct {
         try required_extensions.appendSlice(glfw_extensions);
 
         if (builtin.os.tag == .macos) {
-            try required_extensions.append(vk.extension_info.khr_portability_enumeration.name);
+            try required_extensions.appendSlice(&mac_instance_extensions);
         }
 
         if (builtin.mode == std.builtin.OptimizeMode.Debug) {

@@ -48,11 +48,13 @@ pub const App = struct {
     vki: InstanceDispatch = undefined,
     vkd: DeviceDispatch = undefined,
 
-    instance: vk.Instance = undefined,
+    instance: vk.Instance = .null_handle,
     extensions: ArrayList([*:0]const u8) = undefined,
-    debug_messenger: vk.DebugUtilsMessengerEXT = undefined,
+    debug_messenger: vk.DebugUtilsMessengerEXT = .null_handle,
+
     physical_device: vk.PhysicalDevice = .null_handle,
     device: vk.Device = .null_handle,
+    graphics_queue: vk.Queue = .null_handle,
 
     pub fn init(alloc: Allocator) !App {
         var window = try initWindow();

@@ -28,6 +28,10 @@ const mac_device_extensions = [_][*:0]const u8{
     vk.extension_info.khr_portability_subset.name,
 };
 
+const device_extensions = [_][*:0]const u8{
+    vk.extension_info.khr_swapchain.name,
+};
+
 const QueueFamilyIndices = struct {
     const Self = @This();
 
@@ -36,6 +40,55 @@ const QueueFamilyIndices = struct {
 
     pub fn isComplete(self: Self) bool {
         return self.graphics_family != null and self.present_family != null;
+    }
+};
+
+const SwapChainSupportDetails = struct {
+    const Self = @This();
+
+    capabilities: vk.SurfaceCapabilitiesKHR = undefined,
+    formats: ArrayList(vk.SurfaceFormatKHR) = undefined,
+    present_modes: ArrayList(vk.PresentModeKHR) = undefined,
+
+    pub fn init(
+        alloc: Allocator,
+        device: vk.PhysicalDevice,
+        surface: vk.SurfaceKHR,
+        vki: InstanceDispatch,
+    ) !Self {
+        var details = SwapChainSupportDetails{
+            .formats = ArrayList(vk.SurfaceFormatKHR).init(alloc),
+            .present_modes = ArrayList(vk.PresentModeKHR).init(alloc),
+        };
+
+        details.capabilities = try vki.getPhysicalDeviceSurfaceCapabilitiesKHR(device, surface);
+
+        var format_count: u32 = undefined;
+        var result = try vki.getPhysicalDeviceSurfaceFormatsKHR(device, surface, &format_count, null);
+        try VkAssert.withMessage(result, "Failed to get physical device surface formats.");
+
+        if (format_count > 0) {
+            try details.formats.resize(format_count);
+            result = try vki.getPhysicalDeviceSurfaceFormatsKHR(device, surface, &format_count, details.formats.items.ptr);
+            try VkAssert.withMessage(result, "Failed to get physical device surface formats.");
+        }
+
+        var present_mode_count: u32 = undefined;
+        result = try vki.getPhysicalDeviceSurfacePresentModesKHR(device, surface, &present_mode_count, null);
+        try VkAssert.withMessage(result, "Failed to get physical device surface present modes.");
+
+        if (present_mode_count > 0) {
+            try details.present_modes.resize(present_mode_count);
+            result = try vki.getPhysicalDeviceSurfacePresentModesKHR(device, surface, &present_mode_count, details.present_modes.items.ptr);
+            try VkAssert.withMessage(result, "Failed to get physical device surface present modes.");
+        }
+
+        return details;
+    }
+
+    pub fn deinit(self: *Self) void {
+        self.formats.deinit();
+        self.present_modes.deinit();
     }
 };
 
@@ -50,7 +103,8 @@ pub const App = struct {
     vkd: DeviceDispatch = undefined,
 
     instance: vk.Instance = .null_handle,
-    extensions: ArrayList([*:0]const u8) = undefined,
+    instance_extensions: ArrayList([*:0]const u8) = undefined,
+    device_extensions: ArrayList([*:0]const u8) = undefined,
     debug_messenger: vk.DebugUtilsMessengerEXT = .null_handle,
 
     physical_device: vk.PhysicalDevice = .null_handle,
@@ -96,7 +150,8 @@ pub const App = struct {
         glfw.terminate();
 
         // Struct level cleanup
-        self.extensions.deinit();
+        self.instance_extensions.deinit();
+        self.device_extensions.deinit();
     }
 
     pub fn run(self: *Self) !void {
@@ -122,7 +177,7 @@ pub const App = struct {
         }
 
         try self.createSurface();
-
+        try self.initDeviceExtensions();
         try self.pickPhysicalDevice();
         try self.createLogicalDevice();
     }
@@ -138,8 +193,8 @@ pub const App = struct {
 
         var create_info = vk.InstanceCreateInfo{
             .p_application_info = &app_info,
-            .enabled_extension_count = @intCast(self.extensions.items.len),
-            .pp_enabled_extension_names = self.extensions.items.ptr,
+            .enabled_extension_count = @intCast(self.instance_extensions.items.len),
+            .pp_enabled_extension_names = self.instance_extensions.items.ptr,
             .enabled_layer_count = 0,
             .flags = .{ .enumerate_portability_bit_khr = true },
             .p_next = null,
@@ -147,7 +202,7 @@ pub const App = struct {
 
         if (builtin.mode == std.builtin.OptimizeMode.Debug) {
             const debug_create_info = createDebugMessengerCreateInfo();
-            for (self.extensions.items, 0..) |ext, i| {
+            for (self.instance_extensions.items, 0..) |ext, i| {
                 std.log.debug("Required Instance Extension {}: {s}", .{ i, ext });
             }
 
@@ -192,6 +247,12 @@ pub const App = struct {
         }
     }
 
+    fn initDeviceExtensions(self: *Self) !void {
+        self.device_extensions = ArrayList([*:0]const u8).init(self.allocator);
+        try self.device_extensions.appendSlice(&device_extensions);
+        if (builtin.os.tag == .macos) try self.device_extensions.appendSlice(&mac_device_extensions);
+    }
+
     fn createLogicalDevice(self: *Self) !void {
         const indices = try self.findQueueFamilies(self.physical_device);
         const queue_priority: f32 = 1.0;
@@ -218,7 +279,8 @@ pub const App = struct {
             .p_queue_create_infos = queue_create_infos.ptr,
             .queue_create_info_count = @intCast(queue_create_infos.len),
             .p_enabled_features = &device_features,
-            .enabled_extension_count = 0,
+            .enabled_extension_count = @intCast(self.device_extensions.items.len),
+            .pp_enabled_extension_names = self.device_extensions.items.ptr,
         };
 
         if (builtin.mode == std.builtin.OptimizeMode.Debug) {
@@ -226,11 +288,6 @@ pub const App = struct {
             create_info.pp_enabled_layer_names = &validation_layers;
         } else {
             create_info.enabled_layer_count = 0;
-        }
-
-        if (builtin.os.tag == .macos) {
-            create_info.enabled_extension_count = @intCast(mac_device_extensions.len);
-            create_info.pp_enabled_extension_names = &mac_device_extensions;
         }
 
         self.device = try self.vki.createDevice(self.physical_device, &create_info, null);
@@ -268,8 +325,18 @@ pub const App = struct {
     }
 
     fn isDeviceSuitable(self: *Self, device: vk.PhysicalDevice) !bool {
-        var indices = try self.findQueueFamilies(device);
-        return indices.isComplete();
+        const indices = try self.findQueueFamilies(device);
+        const device_extensions_supported = try self.checkDeviceExtensionSupport(device);
+
+        var swap_chain_adequate = false;
+        if (device_extensions_supported) {
+            var swap_chain_support = try SwapChainSupportDetails.init(self.allocator, device, self.surface, self.vki);
+            defer swap_chain_support.deinit();
+
+            swap_chain_adequate = swap_chain_support.formats.items.len > 0 and swap_chain_support.present_modes.items.len > 0;
+        }
+
+        return indices.isComplete() and device_extensions_supported and swap_chain_adequate;
     }
 
     fn getRequiredExtensions(self: *Self) !void {
@@ -279,7 +346,7 @@ pub const App = struct {
             break :blk error.code;
         };
 
-        var required_extensions = std.ArrayList([*:0]const u8).init(self.allocator);
+        var required_extensions = ArrayList([*:0]const u8).init(self.allocator);
         try required_extensions.appendSlice(glfw_extensions);
 
         if (builtin.os.tag == .macos) {
@@ -321,7 +388,36 @@ pub const App = struct {
             }
         }
 
-        self.extensions = required_extensions;
+        self.instance_extensions = required_extensions;
+    }
+
+    fn checkDeviceExtensionSupport(self: *Self, device: vk.PhysicalDevice) !bool {
+        var extension_count: u32 = 0;
+        var result = try self.vki.enumerateDeviceExtensionProperties(device, null, &extension_count, null);
+        try VkAssert.basic(result);
+
+        var available_extensions = try self.allocator.alloc(vk.ExtensionProperties, extension_count);
+        defer self.allocator.free(available_extensions);
+
+        result = try self.vki.enumerateDeviceExtensionProperties(
+            device,
+            null,
+            &extension_count,
+            available_extensions.ptr,
+        );
+        try VkAssert.basic(result);
+
+        outer: for (self.device_extensions.items) |required_ext| {
+            for (available_extensions) |available_ext| {
+                if (strEql(&available_ext.extension_name, required_ext)) {
+                    continue :outer;
+                }
+            }
+
+            return false;
+        }
+
+        return true;
     }
 
     fn checkValidationLayerSupport(self: *Self) !bool {

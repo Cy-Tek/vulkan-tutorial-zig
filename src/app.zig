@@ -87,7 +87,12 @@ pub const App = struct {
     graphics_queue: vk.Queue = .null_handle,
     present_queue: vk.Queue = .null_handle,
     surface: vk.SurfaceKHR = .null_handle,
+
     swapchain: vk.SwapchainKHR = .null_handle,
+    swapchain_images: []vk.Image = undefined,
+    swapchain_image_views: []vk.ImageView = undefined,
+    swapchain_image_format: vk.Format = undefined,
+    swapchain_extent: vk.Extent2D = undefined,
 
     pub fn init(alloc: Allocator) !App {
         var window = try initWindow();
@@ -114,6 +119,10 @@ pub const App = struct {
 
     pub fn deinit(self: *Self) void {
         // Device level cleanup
+        for (self.swapchain_image_views) |image_view| {
+            self.vkd.destroyImageView(self.device, image_view, null);
+        }
+
         self.vkd.destroySwapchainKHR(self.device, self.swapchain, null);
         self.vkd.destroyDevice(self.device, null);
 
@@ -129,6 +138,7 @@ pub const App = struct {
         // Struct level cleanup
         self.instance_extensions.deinit();
         self.device_extensions.deinit();
+        self.allocator.free(self.swapchain_images);
     }
 
     pub fn run(self: *Self) !void {
@@ -157,7 +167,9 @@ pub const App = struct {
         try self.initDeviceExtensions();
         try self.pickPhysicalDevice();
         try self.createLogicalDevice();
+
         try self.createSwapChain();
+        try self.createImageViews();
     }
 
     fn createInstance(self: *Self) !void {
@@ -319,6 +331,43 @@ pub const App = struct {
         }
 
         self.swapchain = try self.vkd.createSwapchainKHR(self.device, &create_info, null);
+        errdefer self.vkd.destroySwapchainKHR(self.device, self.swapchain, null);
+
+        var result = try self.vkd.getSwapchainImagesKHR(self.device, self.swapchain, &image_count, null);
+        try VkAssert.withMessage(result, "Failed to get swapchain images.");
+
+        self.swapchain_images = try self.allocator.alloc(vk.Image, image_count);
+        result = try self.vkd.getSwapchainImagesKHR(self.device, self.swapchain, &image_count, self.swapchain_images.ptr);
+
+        self.swapchain_image_format = surface_format.format;
+        self.swapchain_extent = extent;
+    }
+
+    fn createImageViews(self: *Self) !void {
+        self.swapchain_image_views = try self.allocator.alloc(vk.ImageView, self.swapchain_images.len);
+
+        for (self.swapchain_images, self.swapchain_image_views) |image, *image_view| {
+            var create_info = vk.ImageViewCreateInfo{
+                .image = image,
+                .view_type = .@"2d",
+                .format = self.swapchain_image_format,
+                .components = .{
+                    .a = .identity,
+                    .r = .identity,
+                    .g = .identity,
+                    .b = .identity,
+                },
+                .subresource_range = .{
+                    .aspect_mask = .{ .color_bit = true },
+                    .base_mip_level = 0,
+                    .level_count = 1,
+                    .base_array_layer = 0,
+                    .layer_count = 1,
+                },
+            };
+
+            image_view.* = try self.vkd.createImageView(self.device, &create_info, null);
+        }
     }
 
     fn chooseSwapExtent(self: *Self, capabilities: vk.SurfaceCapabilitiesKHR) vk.Extent2D {

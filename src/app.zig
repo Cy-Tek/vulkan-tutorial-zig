@@ -87,6 +87,7 @@ pub const App = struct {
     graphics_queue: vk.Queue = .null_handle,
     present_queue: vk.Queue = .null_handle,
     surface: vk.SurfaceKHR = .null_handle,
+    swapchain: vk.SwapchainKHR = .null_handle,
 
     pub fn init(alloc: Allocator) !App {
         var window = try initWindow();
@@ -113,6 +114,7 @@ pub const App = struct {
 
     pub fn deinit(self: *Self) void {
         // Device level cleanup
+        self.vkd.destroySwapchainKHR(self.device, self.swapchain, null);
         self.vkd.destroyDevice(self.device, null);
 
         // Instance level cleanup
@@ -155,6 +157,7 @@ pub const App = struct {
         try self.initDeviceExtensions();
         try self.pickPhysicalDevice();
         try self.createLogicalDevice();
+        try self.createSwapChain();
     }
 
     fn createInstance(self: *Self) !void {
@@ -270,6 +273,100 @@ pub const App = struct {
 
         self.graphics_queue = self.vkd.getDeviceQueue(self.device, indices.graphics_family.?, 0);
         self.present_queue = self.vkd.getDeviceQueue(self.device, indices.present_family.?, 0);
+    }
+
+    fn createSwapChain(self: *Self) !void {
+        const swap_chain_support = try self.querySwapChainSupport(self.physical_device);
+        const surface_format = Self.chooseSwapSurfaceFormat(swap_chain_support.formats.items);
+        const present_mode = Self.chooseSwapPresentMode(swap_chain_support.present_modes.items);
+        const extent = self.chooseSwapExtent(swap_chain_support.capabilities);
+
+        var image_count = swap_chain_support.capabilities.min_image_count + 1;
+
+        if (swap_chain_support.capabilities.max_image_count > 0 and image_count > swap_chain_support.capabilities.max_image_count) {
+            image_count = swap_chain_support.capabilities.max_image_count;
+        }
+
+        var create_info = vk.SwapchainCreateInfoKHR{
+            .surface = self.surface,
+            .min_image_count = image_count,
+            .image_format = surface_format.format,
+            .image_color_space = surface_format.color_space,
+            .image_extent = extent,
+            .image_array_layers = 1,
+            .image_usage = .{
+                .color_attachment_bit = true,
+            },
+            .image_sharing_mode = undefined,
+            .pre_transform = swap_chain_support.capabilities.current_transform,
+            .composite_alpha = .{ .opaque_bit_khr = true },
+            .present_mode = present_mode,
+            .clipped = vk.TRUE,
+            .old_swapchain = .null_handle,
+        };
+
+        const indices = try self.findQueueFamilies(self.physical_device);
+        const queue_family_indices = [_]u32{ indices.graphics_family.?, indices.present_family.? };
+
+        if (indices.graphics_family != indices.present_family) {
+            create_info.image_sharing_mode = .concurrent;
+            create_info.queue_family_index_count = 2;
+            create_info.p_queue_family_indices = &queue_family_indices;
+        } else {
+            create_info.image_sharing_mode = .exclusive;
+            create_info.queue_family_index_count = 0;
+            create_info.p_queue_family_indices = null;
+        }
+
+        self.swapchain = try self.vkd.createSwapchainKHR(self.device, &create_info, null);
+    }
+
+    fn chooseSwapExtent(self: *Self, capabilities: vk.SurfaceCapabilitiesKHR) vk.Extent2D {
+        if (capabilities.current_extent.width != std.math.maxInt(u32)) {
+            return capabilities.current_extent;
+        }
+
+        const size = self.window.getFramebufferSize();
+        var actual_extent = vk.Extent2D{
+            .width = @intCast(size.width),
+            .height = @intCast(size.height),
+        };
+
+        actual_extent.width = std.math.clamp(
+            actual_extent.width,
+            capabilities.min_image_extent.width,
+            capabilities.max_image_extent.width,
+        );
+
+        actual_extent.height = std.math.clamp(
+            actual_extent.height,
+            capabilities.min_image_extent.height,
+            capabilities.max_image_extent.height,
+        );
+
+        return actual_extent;
+    }
+
+    fn chooseSwapPresentMode(available_present_modes: []vk.PresentModeKHR) vk.PresentModeKHR {
+        for (available_present_modes) |present_mode| {
+            if (present_mode == .mailbox_khr) {
+                return present_mode;
+            }
+        }
+
+        return .fifo_khr;
+    }
+
+    fn chooseSwapSurfaceFormat(available_formats: []vk.SurfaceFormatKHR) vk.SurfaceFormatKHR {
+        for (available_formats) |available_format| {
+            if (available_format.format == .b8g8r8a8_srgb and
+                available_format.color_space == .srgb_nonlinear_khr)
+            {
+                return available_format;
+            }
+        }
+
+        return available_formats[0];
     }
 
     fn querySwapChainSupport(self: *Self, device: vk.PhysicalDevice) !SwapChainSupportDetails {

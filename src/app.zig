@@ -52,36 +52,11 @@ const SwapChainSupportDetails = struct {
 
     pub fn init(
         alloc: Allocator,
-        device: vk.PhysicalDevice,
-        surface: vk.SurfaceKHR,
-        vki: InstanceDispatch,
     ) !Self {
         var details = SwapChainSupportDetails{
             .formats = ArrayList(vk.SurfaceFormatKHR).init(alloc),
             .present_modes = ArrayList(vk.PresentModeKHR).init(alloc),
         };
-
-        details.capabilities = try vki.getPhysicalDeviceSurfaceCapabilitiesKHR(device, surface);
-
-        var format_count: u32 = undefined;
-        var result = try vki.getPhysicalDeviceSurfaceFormatsKHR(device, surface, &format_count, null);
-        try VkAssert.withMessage(result, "Failed to get physical device surface formats.");
-
-        if (format_count > 0) {
-            try details.formats.resize(format_count);
-            result = try vki.getPhysicalDeviceSurfaceFormatsKHR(device, surface, &format_count, details.formats.items.ptr);
-            try VkAssert.withMessage(result, "Failed to get physical device surface formats.");
-        }
-
-        var present_mode_count: u32 = undefined;
-        result = try vki.getPhysicalDeviceSurfacePresentModesKHR(device, surface, &present_mode_count, null);
-        try VkAssert.withMessage(result, "Failed to get physical device surface present modes.");
-
-        if (present_mode_count > 0) {
-            try details.present_modes.resize(present_mode_count);
-            result = try vki.getPhysicalDeviceSurfacePresentModesKHR(device, surface, &present_mode_count, details.present_modes.items.ptr);
-            try VkAssert.withMessage(result, "Failed to get physical device surface present modes.");
-        }
 
         return details;
     }
@@ -297,6 +272,33 @@ pub const App = struct {
         self.present_queue = self.vkd.getDeviceQueue(self.device, indices.present_family.?, 0);
     }
 
+    fn querySwapChainSupport(self: *Self, device: vk.PhysicalDevice) !SwapChainSupportDetails {
+        var details = try SwapChainSupportDetails.init(self.allocator);
+        details.capabilities = try self.vki.getPhysicalDeviceSurfaceCapabilitiesKHR(device, self.surface);
+
+        var format_count: u32 = undefined;
+        var result = try self.vki.getPhysicalDeviceSurfaceFormatsKHR(device, self.surface, &format_count, null);
+        try VkAssert.withMessage(result, "Failed to get physical device surface formats.");
+
+        if (format_count > 0) {
+            try details.formats.resize(format_count);
+            result = try self.vki.getPhysicalDeviceSurfaceFormatsKHR(device, self.surface, &format_count, details.formats.items.ptr);
+            try VkAssert.withMessage(result, "Failed to get physical device surface formats.");
+        }
+
+        var present_mode_count: u32 = undefined;
+        result = try self.vki.getPhysicalDeviceSurfacePresentModesKHR(device, self.surface, &present_mode_count, null);
+        try VkAssert.withMessage(result, "Failed to get physical device surface present modes.");
+
+        if (present_mode_count > 0) {
+            try details.present_modes.resize(present_mode_count);
+            result = try self.vki.getPhysicalDeviceSurfacePresentModesKHR(device, self.surface, &present_mode_count, details.present_modes.items.ptr);
+            try VkAssert.withMessage(result, "Failed to get physical device surface present modes.");
+        }
+
+        return details;
+    }
+
     fn findQueueFamilies(self: *Self, physical_device: vk.PhysicalDevice) !QueueFamilyIndices {
         var indices = QueueFamilyIndices{};
 
@@ -330,13 +332,16 @@ pub const App = struct {
 
         var swap_chain_adequate = false;
         if (device_extensions_supported) {
-            var swap_chain_support = try SwapChainSupportDetails.init(self.allocator, device, self.surface, self.vki);
+            var swap_chain_support = try self.querySwapChainSupport(device);
             defer swap_chain_support.deinit();
 
-            swap_chain_adequate = swap_chain_support.formats.items.len > 0 and swap_chain_support.present_modes.items.len > 0;
+            swap_chain_adequate = swap_chain_support.formats.items.len > 0 and
+                swap_chain_support.present_modes.items.len > 0;
         }
 
-        return indices.isComplete() and device_extensions_supported and swap_chain_adequate;
+        return indices.isComplete() and
+            device_extensions_supported and
+            swap_chain_adequate;
     }
 
     fn getRequiredExtensions(self: *Self) !void {

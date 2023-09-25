@@ -5,7 +5,7 @@ This is a port to Zig of the [excellent tutorial book by the Khronos Group](http
 ## Getting Started
 
 To get this project running on your machine, you should just need to install the [Vulkan SDK](https://www.lunarg.com/vulkan-sdk/) and the latest zig master branch (although I think this code should also be compatible with 0.11).
-From there, just run `zig build run` to see a window pop up on your machine. This is very much a work in progress, I've only ported the first 67 pages as of Sep 22, 2023, so be on the lookout for frequent changes in the future.
+From there, just run `zig build run` to see a window pop up on your machine. This is very much a work in progress, I've ported the first 116 pages as of Sep 25, 2023, so be on the lookout for frequent changes in the future.
 I'll do my best to update this README as more progress gets made.
 
 Additionally, if you are trying to follow along with the book, I will have each major chapter under a specific branch for you to look at. For example, if you are looking for the chapter *Drawing a Triangle > Setup*, then the branch name would be `drawing-a-triangle/setup`.

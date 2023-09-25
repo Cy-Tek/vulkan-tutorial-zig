@@ -37,6 +37,22 @@ pub fn build(b: *std.Build) void {
     // step when running `zig build`).
     b.installArtifact(exe);
 
+    const compile_vert_shader = b.addSystemCommand(&.{
+        "glslc",
+        "shaders/shader.vert",
+        "-o",
+        "shaders/vert.spv",
+    });
+    const compile_frag_shader = b.addSystemCommand(&.{
+        "glslc",
+        "shaders/shader.frag",
+        "-o",
+        "shaders/frag.spv",
+    });
+
+    exe.step.dependOn(&compile_vert_shader.step);
+    exe.step.dependOn(&compile_frag_shader.step);
+
     // This *creates* a Run step in the build graph, to be executed when another
     // step is evaluated that depends on it. The next line below will establish
     // such a dependency.

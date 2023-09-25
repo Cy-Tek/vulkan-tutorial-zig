@@ -414,11 +414,14 @@ pub const App = struct {
     }
 
     fn createGraphicsPipeline(self: *Self) !void {
-        const vert_file = @embedFile("../shaders/vert.spv");
-        const frag_file = @embedFile("../shaders/frag.spv");
+        const vert_file align(@alignOf(u32)) = @embedFile("../shaders/vert.spv").*;
+        const frag_file align(@alignOf(u32)) = @embedFile("../shaders/frag.spv").*;
 
-        var vert_shader_module = try self.createShaderModule(vert_file[0..]);
-        var frag_shader_module = try self.createShaderModule(frag_file[0..]);
+        var vert_shader_module = try self.createShaderModule(&vert_file);
+        defer self.vkd.destroyShaderModule(self.device, vert_shader_module, null);
+
+        var frag_shader_module = try self.createShaderModule(&frag_file);
+        defer self.vkd.destroyShaderModule(self.device, frag_shader_module, null);
 
         var vert_shader_stage_info = vk.PipelineShaderStageCreateInfo{
             .stage = .{ .vertex_bit = true },
@@ -540,14 +543,21 @@ pub const App = struct {
             .base_pipeline_index = -1,
         };
 
-        const result = try self.vkd.createGraphicsPipelines(self.device, .null_handle, 1, @ptrCast(&pipeline_info), null, @ptrCast(&self.graphics_pipeline));
+        const result = try self.vkd.createGraphicsPipelines(
+            self.device,
+            .null_handle,
+            1,
+            @ptrCast(&pipeline_info),
+            null,
+            @ptrCast(&self.graphics_pipeline),
+        );
         try VkAssert.withMessage(result, "Failed to create graphics pipeline.");
     }
 
     fn createShaderModule(self: *Self, code: []const u8) !vk.ShaderModule {
         var create_info = vk.ShaderModuleCreateInfo{
             .code_size = code.len,
-            .p_code = @as([*]const u32, @ptrCast(@alignCast(code.ptr))),
+            .p_code = @ptrCast(@alignCast(code.ptr)),
         };
 
         return try self.vkd.createShaderModule(self.device, &create_info, null);

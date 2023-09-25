@@ -28,13 +28,42 @@ const mac_device_extensions = [_][*:0]const u8{
     vk.extension_info.khr_portability_subset.name,
 };
 
+const device_extensions = [_][*:0]const u8{
+    vk.extension_info.khr_swapchain.name,
+};
+
 const QueueFamilyIndices = struct {
     const Self = @This();
 
     graphics_family: ?u32 = null,
+    present_family: ?u32 = null,
 
     pub fn isComplete(self: Self) bool {
-        return self.graphics_family != null;
+        return self.graphics_family != null and self.present_family != null;
+    }
+};
+
+const SwapChainSupportDetails = struct {
+    const Self = @This();
+
+    capabilities: vk.SurfaceCapabilitiesKHR = undefined,
+    formats: ArrayList(vk.SurfaceFormatKHR) = undefined,
+    present_modes: ArrayList(vk.PresentModeKHR) = undefined,
+
+    pub fn init(
+        alloc: Allocator,
+    ) !Self {
+        var details = SwapChainSupportDetails{
+            .formats = ArrayList(vk.SurfaceFormatKHR).init(alloc),
+            .present_modes = ArrayList(vk.PresentModeKHR).init(alloc),
+        };
+
+        return details;
+    }
+
+    pub fn deinit(self: *Self) void {
+        self.formats.deinit();
+        self.present_modes.deinit();
     }
 };
 
@@ -49,16 +78,32 @@ pub const App = struct {
     vkd: DeviceDispatch = undefined,
 
     instance: vk.Instance = .null_handle,
-    extensions: ArrayList([*:0]const u8) = undefined,
+    instance_extensions: ArrayList([*:0]const u8) = undefined,
+    device_extensions: ArrayList([*:0]const u8) = undefined,
     debug_messenger: vk.DebugUtilsMessengerEXT = .null_handle,
 
     physical_device: vk.PhysicalDevice = .null_handle,
     device: vk.Device = .null_handle,
     graphics_queue: vk.Queue = .null_handle,
+    present_queue: vk.Queue = .null_handle,
+    surface: vk.SurfaceKHR = .null_handle,
+
+    swapchain: vk.SwapchainKHR = .null_handle,
+    swapchain_images: []vk.Image = undefined,
+    swapchain_image_views: []vk.ImageView = undefined,
+    swapchain_image_format: vk.Format = undefined,
+    swapchain_extent: vk.Extent2D = undefined,
+
+    render_pass: vk.RenderPass = undefined,
+    pipeline_layout: vk.PipelineLayout = undefined,
+    graphics_pipeline: vk.Pipeline = undefined,
 
     pub fn init(alloc: Allocator) !App {
         var window = try initWindow();
-        errdefer deinitGlfw(&window);
+        errdefer {
+            window.destroy();
+            glfw.terminate();
+        }
 
         const base_dispatch = try BaseDispatch.load(@as(
             vk.PfnGetInstanceProcAddr,
@@ -77,12 +122,31 @@ pub const App = struct {
     }
 
     pub fn deinit(self: *Self) void {
-        self.vkd.destroyDevice(self.device, null);
-        self.vki.destroyDebugUtilsMessengerEXT(self.instance, self.debug_messenger, null);
-        self.vki.destroyInstance(self.instance, null);
-        self.extensions.deinit();
+        // Device level cleanup
+        self.vkd.destroyPipeline(self.device, self.graphics_pipeline, null);
+        self.vkd.destroyPipelineLayout(self.device, self.pipeline_layout, null);
+        self.vkd.destroyRenderPass(self.device, self.render_pass, null);
 
-        deinitGlfw(&self.window);
+        for (self.swapchain_image_views) |image_view| {
+            self.vkd.destroyImageView(self.device, image_view, null);
+        }
+
+        self.vkd.destroySwapchainKHR(self.device, self.swapchain, null);
+        self.vkd.destroyDevice(self.device, null);
+
+        // Instance level cleanup
+        self.vki.destroyDebugUtilsMessengerEXT(self.instance, self.debug_messenger, null);
+        self.vki.destroySurfaceKHR(self.instance, self.surface, null);
+        self.vki.destroyInstance(self.instance, null);
+
+        // GLFW cleanup
+        self.window.destroy();
+        glfw.terminate();
+
+        // Struct level cleanup
+        self.instance_extensions.deinit();
+        self.device_extensions.deinit();
+        self.allocator.free(self.swapchain_images);
     }
 
     pub fn run(self: *Self) !void {
@@ -107,8 +171,15 @@ pub const App = struct {
             try self.setupDebugMessenger();
         }
 
+        try self.createSurface();
+        try self.initDeviceExtensions();
         try self.pickPhysicalDevice();
         try self.createLogicalDevice();
+
+        try self.createSwapChain();
+        try self.createImageViews();
+        try self.createRenderPass();
+        try self.createGraphicsPipeline();
     }
 
     fn createInstance(self: *Self) !void {
@@ -122,8 +193,8 @@ pub const App = struct {
 
         var create_info = vk.InstanceCreateInfo{
             .p_application_info = &app_info,
-            .enabled_extension_count = @intCast(self.extensions.items.len),
-            .pp_enabled_extension_names = self.extensions.items.ptr,
+            .enabled_extension_count = @intCast(self.instance_extensions.items.len),
+            .pp_enabled_extension_names = self.instance_extensions.items.ptr,
             .enabled_layer_count = 0,
             .flags = .{ .enumerate_portability_bit_khr = true },
             .p_next = null,
@@ -131,7 +202,7 @@ pub const App = struct {
 
         if (builtin.mode == std.builtin.OptimizeMode.Debug) {
             const debug_create_info = createDebugMessengerCreateInfo();
-            for (self.extensions.items, 0..) |ext, i| {
+            for (self.instance_extensions.items, 0..) |ext, i| {
                 std.log.debug("Required Instance Extension {}: {s}", .{ i, ext });
             }
 
@@ -146,6 +217,11 @@ pub const App = struct {
 
         self.instance = try self.vkb.createInstance(&create_info, null);
         self.vki = try InstanceDispatch.load(self.instance, self.vkb.dispatch.vkGetInstanceProcAddr);
+    }
+
+    fn createSurface(self: *Self) !void {
+        var result = glfw.createWindowSurface(self.instance, self.window, null, &self.surface);
+        try VkAssert.withMessage(@enumFromInt(result), "Failed to create window surface");
     }
 
     fn pickPhysicalDevice(self: *Self) !void {
@@ -171,23 +247,40 @@ pub const App = struct {
         }
     }
 
+    fn initDeviceExtensions(self: *Self) !void {
+        self.device_extensions = ArrayList([*:0]const u8).init(self.allocator);
+        try self.device_extensions.appendSlice(&device_extensions);
+        if (builtin.os.tag == .macos) try self.device_extensions.appendSlice(&mac_device_extensions);
+    }
+
     fn createLogicalDevice(self: *Self) !void {
         const indices = try self.findQueueFamilies(self.physical_device);
         const queue_priority: f32 = 1.0;
 
-        var queue_create_info = vk.DeviceQueueCreateInfo{
-            .queue_family_index = indices.graphics_family.?,
-            .queue_count = 1,
-            .p_queue_priorities = @ptrCast(&queue_priority),
-        };
+        var unique_queue_families = std.AutoArrayHashMap(u32, void).init(self.allocator);
+        defer unique_queue_families.deinit();
+
+        try unique_queue_families.put(indices.graphics_family.?, {});
+        try unique_queue_families.put(indices.present_family.?, {});
+
+        var queue_create_infos = try self.allocator.alloc(vk.DeviceQueueCreateInfo, unique_queue_families.count());
+        defer self.allocator.free(queue_create_infos);
+
+        for (unique_queue_families.keys(), 0..) |queue_family, i| {
+            queue_create_infos[i] = vk.DeviceQueueCreateInfo{
+                .queue_family_index = queue_family,
+                .queue_count = 1,
+                .p_queue_priorities = @ptrCast(&queue_priority),
+            };
+        }
 
         const device_features = vk.PhysicalDeviceFeatures{};
-
         var create_info = vk.DeviceCreateInfo{
-            .p_queue_create_infos = @ptrCast(&queue_create_info),
-            .queue_create_info_count = 1,
+            .p_queue_create_infos = queue_create_infos.ptr,
+            .queue_create_info_count = @intCast(queue_create_infos.len),
             .p_enabled_features = &device_features,
-            .enabled_extension_count = 0,
+            .enabled_extension_count = @intCast(self.device_extensions.items.len),
+            .pp_enabled_extension_names = self.device_extensions.items.ptr,
         };
 
         if (builtin.mode == std.builtin.OptimizeMode.Debug) {
@@ -197,15 +290,352 @@ pub const App = struct {
             create_info.enabled_layer_count = 0;
         }
 
-        if (builtin.os.tag == .macos) {
-            create_info.enabled_extension_count = @intCast(mac_device_extensions.len);
-            create_info.pp_enabled_extension_names = &mac_device_extensions;
-        }
-
         self.device = try self.vki.createDevice(self.physical_device, &create_info, null);
         self.vkd = try DeviceDispatch.load(self.device, self.vki.dispatch.vkGetDeviceProcAddr);
 
         self.graphics_queue = self.vkd.getDeviceQueue(self.device, indices.graphics_family.?, 0);
+        self.present_queue = self.vkd.getDeviceQueue(self.device, indices.present_family.?, 0);
+    }
+
+    fn createSwapChain(self: *Self) !void {
+        const swap_chain_support = try self.querySwapChainSupport(self.physical_device);
+        const surface_format = Self.chooseSwapSurfaceFormat(swap_chain_support.formats.items);
+        const present_mode = Self.chooseSwapPresentMode(swap_chain_support.present_modes.items);
+        const extent = self.chooseSwapExtent(swap_chain_support.capabilities);
+
+        var image_count = swap_chain_support.capabilities.min_image_count + 1;
+
+        if (swap_chain_support.capabilities.max_image_count > 0 and image_count > swap_chain_support.capabilities.max_image_count) {
+            image_count = swap_chain_support.capabilities.max_image_count;
+        }
+
+        var create_info = vk.SwapchainCreateInfoKHR{
+            .surface = self.surface,
+            .min_image_count = image_count,
+            .image_format = surface_format.format,
+            .image_color_space = surface_format.color_space,
+            .image_extent = extent,
+            .image_array_layers = 1,
+            .image_usage = .{
+                .color_attachment_bit = true,
+            },
+            .image_sharing_mode = undefined,
+            .pre_transform = swap_chain_support.capabilities.current_transform,
+            .composite_alpha = .{ .opaque_bit_khr = true },
+            .present_mode = present_mode,
+            .clipped = vk.TRUE,
+            .old_swapchain = .null_handle,
+        };
+
+        const indices = try self.findQueueFamilies(self.physical_device);
+        const queue_family_indices = [_]u32{ indices.graphics_family.?, indices.present_family.? };
+
+        if (indices.graphics_family != indices.present_family) {
+            create_info.image_sharing_mode = .concurrent;
+            create_info.queue_family_index_count = 2;
+            create_info.p_queue_family_indices = &queue_family_indices;
+        } else {
+            create_info.image_sharing_mode = .exclusive;
+            create_info.queue_family_index_count = 0;
+            create_info.p_queue_family_indices = null;
+        }
+
+        self.swapchain = try self.vkd.createSwapchainKHR(self.device, &create_info, null);
+        errdefer self.vkd.destroySwapchainKHR(self.device, self.swapchain, null);
+
+        var result = try self.vkd.getSwapchainImagesKHR(self.device, self.swapchain, &image_count, null);
+        try VkAssert.withMessage(result, "Failed to get swapchain images.");
+
+        self.swapchain_images = try self.allocator.alloc(vk.Image, image_count);
+        result = try self.vkd.getSwapchainImagesKHR(self.device, self.swapchain, &image_count, self.swapchain_images.ptr);
+
+        self.swapchain_image_format = surface_format.format;
+        self.swapchain_extent = extent;
+    }
+
+    fn createImageViews(self: *Self) !void {
+        self.swapchain_image_views = try self.allocator.alloc(vk.ImageView, self.swapchain_images.len);
+
+        for (self.swapchain_images, self.swapchain_image_views) |image, *image_view| {
+            var create_info = vk.ImageViewCreateInfo{
+                .image = image,
+                .view_type = .@"2d",
+                .format = self.swapchain_image_format,
+                .components = .{
+                    .a = .identity,
+                    .r = .identity,
+                    .g = .identity,
+                    .b = .identity,
+                },
+                .subresource_range = .{
+                    .aspect_mask = .{ .color_bit = true },
+                    .base_mip_level = 0,
+                    .level_count = 1,
+                    .base_array_layer = 0,
+                    .layer_count = 1,
+                },
+            };
+
+            image_view.* = try self.vkd.createImageView(self.device, &create_info, null);
+        }
+    }
+
+    fn createRenderPass(self: *Self) !void {
+        const color_attachment = vk.AttachmentDescription{
+            .format = self.swapchain_image_format,
+            .samples = .{ .@"1_bit" = true },
+            .load_op = .clear,
+            .store_op = .store,
+            .stencil_load_op = .dont_care,
+            .stencil_store_op = .dont_care,
+            .initial_layout = .undefined,
+            .final_layout = .present_src_khr,
+        };
+
+        const color_attachment_ref = vk.AttachmentReference{
+            .attachment = 0,
+            .layout = .color_attachment_optimal,
+        };
+
+        const subpass = vk.SubpassDescription{
+            .pipeline_bind_point = .graphics,
+            .color_attachment_count = 1,
+            .p_color_attachments = @ptrCast(&color_attachment_ref),
+        };
+
+        const render_pass_info = vk.RenderPassCreateInfo{
+            .attachment_count = 1,
+            .p_attachments = @ptrCast(&color_attachment),
+            .subpass_count = 1,
+            .p_subpasses = @ptrCast(&subpass),
+        };
+
+        self.render_pass = try self.vkd.createRenderPass(self.device, &render_pass_info, null);
+    }
+
+    fn createGraphicsPipeline(self: *Self) !void {
+        const vert_file align(@alignOf(u32)) = @embedFile("../shaders/vert.spv").*;
+        const frag_file align(@alignOf(u32)) = @embedFile("../shaders/frag.spv").*;
+
+        var vert_shader_module = try self.createShaderModule(&vert_file);
+        defer self.vkd.destroyShaderModule(self.device, vert_shader_module, null);
+
+        var frag_shader_module = try self.createShaderModule(&frag_file);
+        defer self.vkd.destroyShaderModule(self.device, frag_shader_module, null);
+
+        var vert_shader_stage_info = vk.PipelineShaderStageCreateInfo{
+            .stage = .{ .vertex_bit = true },
+            .module = vert_shader_module,
+            .p_name = "main",
+        };
+
+        var frag_shader_stage_info = vk.PipelineShaderStageCreateInfo{
+            .stage = .{ .fragment_bit = true },
+            .module = frag_shader_module,
+            .p_name = "main",
+        };
+
+        var shader_stages = [_]vk.PipelineShaderStageCreateInfo{ vert_shader_stage_info, frag_shader_stage_info };
+
+        const vertex_input_info = vk.PipelineVertexInputStateCreateInfo{
+            .vertex_binding_description_count = 0,
+            .vertex_attribute_description_count = 0,
+        };
+
+        const input_assembly = vk.PipelineInputAssemblyStateCreateInfo{
+            .topology = .triangle_list,
+            .primitive_restart_enable = vk.FALSE,
+        };
+
+        const viewport = vk.Viewport{
+            .x = 0.0,
+            .y = 0.0,
+            .width = @floatFromInt(self.swapchain_extent.width),
+            .height = @floatFromInt(self.swapchain_extent.height),
+            .min_depth = 0.0,
+            .max_depth = 1.0,
+        };
+
+        const scissor = vk.Rect2D{
+            .offset = .{ .x = 0, .y = 0 },
+            .extent = self.swapchain_extent,
+        };
+
+        const dynamic_states = [_]vk.DynamicState{ .viewport, .scissor };
+
+        const dynamic_state = vk.PipelineDynamicStateCreateInfo{
+            .dynamic_state_count = @intCast(dynamic_states.len),
+            .p_dynamic_states = &dynamic_states,
+        };
+
+        const viewport_state = vk.PipelineViewportStateCreateInfo{
+            .viewport_count = 1,
+            .p_viewports = @ptrCast(&viewport),
+            .scissor_count = 1,
+            .p_scissors = @ptrCast(&scissor),
+        };
+
+        const rasterizer = vk.PipelineRasterizationStateCreateInfo{
+            .depth_clamp_enable = vk.FALSE,
+            .rasterizer_discard_enable = vk.FALSE,
+            .polygon_mode = .fill,
+            .line_width = 1.0,
+            .cull_mode = .{ .back_bit = true },
+            .front_face = .clockwise,
+            .depth_bias_enable = vk.FALSE,
+            .depth_bias_clamp = 0.0,
+            .depth_bias_slope_factor = 0.0,
+            .depth_bias_constant_factor = 0.0,
+        };
+
+        const multisampling = vk.PipelineMultisampleStateCreateInfo{
+            .sample_shading_enable = vk.FALSE,
+            .rasterization_samples = .{ .@"1_bit" = true },
+            .min_sample_shading = 1.0,
+            .p_sample_mask = null,
+            .alpha_to_coverage_enable = vk.FALSE,
+            .alpha_to_one_enable = vk.FALSE,
+        };
+
+        const color_blend_attachment = vk.PipelineColorBlendAttachmentState{
+            .color_write_mask = .{ .r_bit = true, .g_bit = true, .b_bit = true, .a_bit = true },
+            .blend_enable = vk.FALSE,
+            .src_color_blend_factor = .one,
+            .dst_color_blend_factor = .zero,
+            .color_blend_op = .add,
+            .src_alpha_blend_factor = .one,
+            .dst_alpha_blend_factor = .zero,
+            .alpha_blend_op = .add,
+        };
+
+        const color_blending = vk.PipelineColorBlendStateCreateInfo{
+            .logic_op_enable = vk.FALSE,
+            .logic_op = .copy,
+            .attachment_count = 1,
+            .p_attachments = @ptrCast(&color_blend_attachment),
+            .blend_constants = [4]f32{ 0.0, 0.0, 0.0, 0.0 },
+        };
+
+        const pipeline_layout_info = vk.PipelineLayoutCreateInfo{
+            .set_layout_count = 0,
+            .p_set_layouts = null,
+            .push_constant_range_count = 0,
+            .p_push_constant_ranges = null,
+        };
+
+        self.pipeline_layout = try self.vkd.createPipelineLayout(self.device, &pipeline_layout_info, null);
+
+        const pipeline_info = vk.GraphicsPipelineCreateInfo{
+            .stage_count = 2,
+            .p_stages = &shader_stages,
+            .p_vertex_input_state = &vertex_input_info,
+            .p_input_assembly_state = &input_assembly,
+            .p_viewport_state = &viewport_state,
+            .p_rasterization_state = &rasterizer,
+            .p_multisample_state = &multisampling,
+            .p_depth_stencil_state = null,
+            .p_color_blend_state = &color_blending,
+            .p_dynamic_state = &dynamic_state,
+            .layout = self.pipeline_layout,
+            .render_pass = self.render_pass,
+            .subpass = 0,
+            .base_pipeline_handle = .null_handle,
+            .base_pipeline_index = -1,
+        };
+
+        const result = try self.vkd.createGraphicsPipelines(
+            self.device,
+            .null_handle,
+            1,
+            @ptrCast(&pipeline_info),
+            null,
+            @ptrCast(&self.graphics_pipeline),
+        );
+        try VkAssert.withMessage(result, "Failed to create graphics pipeline.");
+    }
+
+    fn createShaderModule(self: *Self, code: []const u8) !vk.ShaderModule {
+        var create_info = vk.ShaderModuleCreateInfo{
+            .code_size = code.len,
+            .p_code = @ptrCast(@alignCast(code.ptr)),
+        };
+
+        return try self.vkd.createShaderModule(self.device, &create_info, null);
+    }
+
+    fn chooseSwapExtent(self: *Self, capabilities: vk.SurfaceCapabilitiesKHR) vk.Extent2D {
+        if (capabilities.current_extent.width != std.math.maxInt(u32)) {
+            return capabilities.current_extent;
+        }
+
+        const size = self.window.getFramebufferSize();
+        var actual_extent = vk.Extent2D{
+            .width = @intCast(size.width),
+            .height = @intCast(size.height),
+        };
+
+        actual_extent.width = std.math.clamp(
+            actual_extent.width,
+            capabilities.min_image_extent.width,
+            capabilities.max_image_extent.width,
+        );
+
+        actual_extent.height = std.math.clamp(
+            actual_extent.height,
+            capabilities.min_image_extent.height,
+            capabilities.max_image_extent.height,
+        );
+
+        return actual_extent;
+    }
+
+    fn chooseSwapPresentMode(available_present_modes: []vk.PresentModeKHR) vk.PresentModeKHR {
+        for (available_present_modes) |present_mode| {
+            if (present_mode == .mailbox_khr) {
+                return present_mode;
+            }
+        }
+
+        return .fifo_khr;
+    }
+
+    fn chooseSwapSurfaceFormat(available_formats: []vk.SurfaceFormatKHR) vk.SurfaceFormatKHR {
+        for (available_formats) |available_format| {
+            if (available_format.format == .b8g8r8a8_srgb and
+                available_format.color_space == .srgb_nonlinear_khr)
+            {
+                return available_format;
+            }
+        }
+
+        return available_formats[0];
+    }
+
+    fn querySwapChainSupport(self: *Self, device: vk.PhysicalDevice) !SwapChainSupportDetails {
+        var details = try SwapChainSupportDetails.init(self.allocator);
+        details.capabilities = try self.vki.getPhysicalDeviceSurfaceCapabilitiesKHR(device, self.surface);
+
+        var format_count: u32 = undefined;
+        var result = try self.vki.getPhysicalDeviceSurfaceFormatsKHR(device, self.surface, &format_count, null);
+        try VkAssert.withMessage(result, "Failed to get physical device surface formats.");
+
+        if (format_count > 0) {
+            try details.formats.resize(format_count);
+            result = try self.vki.getPhysicalDeviceSurfaceFormatsKHR(device, self.surface, &format_count, details.formats.items.ptr);
+            try VkAssert.withMessage(result, "Failed to get physical device surface formats.");
+        }
+
+        var present_mode_count: u32 = undefined;
+        result = try self.vki.getPhysicalDeviceSurfacePresentModesKHR(device, self.surface, &present_mode_count, null);
+        try VkAssert.withMessage(result, "Failed to get physical device surface present modes.");
+
+        if (present_mode_count > 0) {
+            try details.present_modes.resize(present_mode_count);
+            result = try self.vki.getPhysicalDeviceSurfacePresentModesKHR(device, self.surface, &present_mode_count, details.present_modes.items.ptr);
+            try VkAssert.withMessage(result, "Failed to get physical device surface present modes.");
+        }
+
+        return details;
     }
 
     fn findQueueFamilies(self: *Self, physical_device: vk.PhysicalDevice) !QueueFamilyIndices {
@@ -226,14 +656,31 @@ pub const App = struct {
             if (indices.isComplete()) {
                 break;
             }
+
+            if (try self.vki.getPhysicalDeviceSurfaceSupportKHR(physical_device, @intCast(i), self.surface) == vk.TRUE) {
+                indices.present_family = @intCast(i);
+            }
         }
 
         return indices;
     }
 
     fn isDeviceSuitable(self: *Self, device: vk.PhysicalDevice) !bool {
-        var indices = try self.findQueueFamilies(device);
-        return indices.isComplete();
+        const indices = try self.findQueueFamilies(device);
+        const device_extensions_supported = try self.checkDeviceExtensionSupport(device);
+
+        var swap_chain_adequate = false;
+        if (device_extensions_supported) {
+            var swap_chain_support = try self.querySwapChainSupport(device);
+            defer swap_chain_support.deinit();
+
+            swap_chain_adequate = swap_chain_support.formats.items.len > 0 and
+                swap_chain_support.present_modes.items.len > 0;
+        }
+
+        return indices.isComplete() and
+            device_extensions_supported and
+            swap_chain_adequate;
     }
 
     fn getRequiredExtensions(self: *Self) !void {
@@ -243,7 +690,7 @@ pub const App = struct {
             break :blk error.code;
         };
 
-        var required_extensions = std.ArrayList([*:0]const u8).init(self.allocator);
+        var required_extensions = ArrayList([*:0]const u8).init(self.allocator);
         try required_extensions.appendSlice(glfw_extensions);
 
         if (builtin.os.tag == .macos) {
@@ -285,7 +732,36 @@ pub const App = struct {
             }
         }
 
-        self.extensions = required_extensions;
+        self.instance_extensions = required_extensions;
+    }
+
+    fn checkDeviceExtensionSupport(self: *Self, device: vk.PhysicalDevice) !bool {
+        var extension_count: u32 = 0;
+        var result = try self.vki.enumerateDeviceExtensionProperties(device, null, &extension_count, null);
+        try VkAssert.basic(result);
+
+        var available_extensions = try self.allocator.alloc(vk.ExtensionProperties, extension_count);
+        defer self.allocator.free(available_extensions);
+
+        result = try self.vki.enumerateDeviceExtensionProperties(
+            device,
+            null,
+            &extension_count,
+            available_extensions.ptr,
+        );
+        try VkAssert.basic(result);
+
+        outer: for (self.device_extensions.items) |required_ext| {
+            for (available_extensions) |available_ext| {
+                if (strEql(&available_ext.extension_name, required_ext)) {
+                    continue :outer;
+                }
+            }
+
+            return false;
+        }
+
+        return true;
     }
 
     fn checkValidationLayerSupport(self: *Self) !bool {
@@ -346,11 +822,6 @@ fn debugCallback(
     }
 
     return vk.TRUE;
-}
-
-fn deinitGlfw(window: *glfw.Window) void {
-    window.destroy();
-    glfw.terminate();
 }
 
 // This is a weird hack to handle the fact that many vulkan names are pre-allocated

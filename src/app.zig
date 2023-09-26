@@ -15,6 +15,7 @@ const DeviceDispatch = vk_ctx.DeviceDispatch;
 
 const width = 800;
 const height = 600;
+const max_frames_in_flight = 2;
 
 const validation_layers = [_][*:0]const u8{
     "VK_LAYER_KHRONOS_validation",
@@ -101,9 +102,10 @@ pub const App = struct {
     command_pool: vk.CommandPool = undefined,
     command_buffers: []vk.CommandBuffer = undefined,
 
-    image_available_semaphore: vk.Semaphore = undefined,
-    render_finished_semaphore: vk.Semaphore = undefined,
-    in_flight_fence: vk.Fence = undefined,
+    image_available_semaphores: []vk.Semaphore = undefined,
+    render_finished_semaphores: []vk.Semaphore = undefined,
+    in_flight_fences: []vk.Fence = undefined,
+    current_frame: u8 = 0,
 
     pub fn init(alloc: Allocator) !App {
         var window = try initWindow();
@@ -131,9 +133,12 @@ pub const App = struct {
     pub fn deinit(self: *Self) void {
         // Device level cleanup
 
-        self.vkd.destroySemaphore(self.device, self.image_available_semaphore, null);
-        self.vkd.destroySemaphore(self.device, self.render_finished_semaphore, null);
-        self.vkd.destroyFence(self.device, self.in_flight_fence, null);
+        for (0..max_frames_in_flight) |i| {
+            self.vkd.destroySemaphore(self.device, self.image_available_semaphores[i], null);
+            self.vkd.destroySemaphore(self.device, self.render_finished_semaphores[i], null);
+            self.vkd.destroyFence(self.device, self.in_flight_fences[i], null);
+        }
+
         self.vkd.destroyCommandPool(self.device, self.command_pool, null);
 
         for (self.swapchain_framebuffers) |framebuffer| {
@@ -204,7 +209,7 @@ pub const App = struct {
         try self.createGraphicsPipeline();
         try self.createFramebuffers();
         try self.createCommandPool();
-        try self.createCommandBuffer();
+        try self.createCommandBuffers();
         try self.createSyncObjects();
     }
 
@@ -624,8 +629,8 @@ pub const App = struct {
         self.command_pool = try self.vkd.createCommandPool(self.device, &pool_info, null);
     }
 
-    fn createCommandBuffer(self: *Self) !void {
-        const buffer_count = 1;
+    fn createCommandBuffers(self: *Self) !void {
+        const buffer_count = max_frames_in_flight;
         const alloc_info = vk.CommandBufferAllocateInfo{
             .command_buffer_count = buffer_count,
             .command_pool = self.command_pool,
@@ -644,9 +649,20 @@ pub const App = struct {
             .flags = .{ .signaled_bit = true },
         };
 
-        self.image_available_semaphore = try self.vkd.createSemaphore(self.device, &semaphore_info, null);
-        self.render_finished_semaphore = try self.vkd.createSemaphore(self.device, &semaphore_info, null);
-        self.in_flight_fence = try self.vkd.createFence(self.device, &fence_info, null);
+        self.image_available_semaphores = try self.allocator.alloc(vk.Semaphore, max_frames_in_flight);
+        errdefer self.allocator.free(self.image_available_semaphores);
+
+        self.render_finished_semaphores = try self.allocator.alloc(vk.Semaphore, max_frames_in_flight);
+        errdefer self.allocator.free(self.render_finished_semaphores);
+
+        self.in_flight_fences = try self.allocator.alloc(vk.Fence, max_frames_in_flight);
+        errdefer self.allocator.free(self.in_flight_fences);
+
+        for (0..max_frames_in_flight) |i| {
+            self.image_available_semaphores[i] = try self.vkd.createSemaphore(self.device, &semaphore_info, null);
+            self.render_finished_semaphores[i] = try self.vkd.createSemaphore(self.device, &semaphore_info, null);
+            self.in_flight_fences[i] = try self.vkd.createFence(self.device, &fence_info, null);
+        }
     }
 
     fn recordCommandBuffer(self: *Self, buffer: vk.CommandBuffer, image_index: u32) !void {
@@ -695,32 +711,32 @@ pub const App = struct {
     }
 
     fn drawFrame(self: *Self) !void {
-        var result = try self.vkd.waitForFences(self.device, 1, @ptrCast(&self.in_flight_fence), vk.TRUE, std.math.maxInt(u64));
+        var result = try self.vkd.waitForFences(self.device, 1, @ptrCast(&self.in_flight_fences[self.current_frame]), vk.TRUE, std.math.maxInt(u64));
         try VkAssert.withMessage(result, "Failed to wait for fences.");
 
-        try self.vkd.resetFences(self.device, 1, @ptrCast(&self.in_flight_fence));
+        try self.vkd.resetFences(self.device, 1, @ptrCast(&self.in_flight_fences[self.current_frame]));
 
-        const next_image = try self.vkd.acquireNextImageKHR(self.device, self.swapchain, std.math.maxInt(u64), self.image_available_semaphore, .null_handle);
+        const next_image = try self.vkd.acquireNextImageKHR(self.device, self.swapchain, std.math.maxInt(u64), self.image_available_semaphores[self.current_frame], .null_handle);
         try VkAssert.withMessage(next_image.result, "Failed to acquire next image.");
 
-        try self.vkd.resetCommandBuffer(self.command_buffers[0], .{});
-        try self.recordCommandBuffer(self.command_buffers[0], next_image.image_index);
+        try self.vkd.resetCommandBuffer(self.command_buffers[self.current_frame], .{});
+        try self.recordCommandBuffer(self.command_buffers[self.current_frame], next_image.image_index);
 
-        const wait_semaphores = [_]vk.Semaphore{self.image_available_semaphore};
+        const wait_semaphores = [_]vk.Semaphore{self.image_available_semaphores[self.current_frame]};
         const wait_stages = [_]vk.PipelineStageFlags{.{ .color_attachment_output_bit = true }};
-        const signal_semaphores = [_]vk.Semaphore{self.render_finished_semaphore};
+        const signal_semaphores = [_]vk.Semaphore{self.render_finished_semaphores[self.current_frame]};
 
         const submit_info = vk.SubmitInfo{
             .wait_semaphore_count = @intCast(wait_semaphores.len),
             .p_wait_semaphores = &wait_semaphores,
             .p_wait_dst_stage_mask = &wait_stages,
-            .command_buffer_count = @intCast(self.command_buffers.len),
-            .p_command_buffers = self.command_buffers.ptr,
+            .command_buffer_count = 1,
+            .p_command_buffers = @ptrCast(&self.command_buffers[self.current_frame]),
             .signal_semaphore_count = @intCast(signal_semaphores.len),
             .p_signal_semaphores = &signal_semaphores,
         };
 
-        try self.vkd.queueSubmit(self.graphics_queue, 1, @ptrCast(&submit_info), self.in_flight_fence);
+        try self.vkd.queueSubmit(self.graphics_queue, 1, @ptrCast(&submit_info), self.in_flight_fences[self.current_frame]);
 
         const swapchains = [_]vk.SwapchainKHR{self.swapchain};
         const present_info = vk.PresentInfoKHR{
@@ -733,6 +749,8 @@ pub const App = struct {
 
         result = try self.vkd.queuePresentKHR(self.present_queue, &present_info);
         try VkAssert.withMessage(result, "Failed to submit the present queue.");
+
+        self.current_frame = (self.current_frame + 1) % max_frames_in_flight;
     }
 
     fn createShaderModule(self: *Self, code: []const u8) !vk.ShaderModule {

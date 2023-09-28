@@ -72,7 +72,7 @@ pub const App = struct {
     const Self = @This();
 
     allocator: Allocator,
-    window: glfw.Window,
+    window: glfw.Window = undefined,
 
     vkb: BaseDispatch = undefined,
     vki: InstanceDispatch = undefined,
@@ -96,35 +96,28 @@ pub const App = struct {
     swapchain_extent: vk.Extent2D = undefined,
     swapchain_framebuffers: []vk.Framebuffer = undefined,
 
-    render_pass: vk.RenderPass = undefined,
-    pipeline_layout: vk.PipelineLayout = undefined,
-    graphics_pipeline: vk.Pipeline = undefined,
-    command_pool: vk.CommandPool = undefined,
+    render_pass: vk.RenderPass = .null_handle,
+    pipeline_layout: vk.PipelineLayout = .null_handle,
+    graphics_pipeline: vk.Pipeline = .null_handle,
+    command_pool: vk.CommandPool = .null_handle,
     command_buffers: []vk.CommandBuffer = undefined,
 
     image_available_semaphores: []vk.Semaphore = undefined,
     render_finished_semaphores: []vk.Semaphore = undefined,
     in_flight_fences: []vk.Fence = undefined,
     current_frame: u8 = 0,
+    framebuffer_resized: bool = false,
 
     pub fn init(alloc: Allocator) !App {
-        var window = try initWindow();
-        errdefer {
-            window.destroy();
-            glfw.terminate();
-        }
+        var app = App{
+            .allocator = alloc,
+        };
+        try app.initWindow();
 
-        const base_dispatch = try BaseDispatch.load(@as(
+        app.vkb = try BaseDispatch.load(@as(
             vk.PfnGetInstanceProcAddr,
             @ptrCast(&glfw.getInstanceProcAddress),
         ));
-
-        var app = App{
-            .allocator = alloc,
-            .window = window,
-            .vkb = base_dispatch,
-        };
-
         try app.initVulkan();
 
         return app;
@@ -140,20 +133,12 @@ pub const App = struct {
         }
 
         self.vkd.destroyCommandPool(self.device, self.command_pool, null);
-
-        for (self.swapchain_framebuffers) |framebuffer| {
-            self.vkd.destroyFramebuffer(self.device, framebuffer, null);
-        }
+        self.cleanupSwapchain();
 
         self.vkd.destroyPipeline(self.device, self.graphics_pipeline, null);
         self.vkd.destroyPipelineLayout(self.device, self.pipeline_layout, null);
         self.vkd.destroyRenderPass(self.device, self.render_pass, null);
 
-        for (self.swapchain_image_views) |image_view| {
-            self.vkd.destroyImageView(self.device, image_view, null);
-        }
-
-        self.vkd.destroySwapchainKHR(self.device, self.swapchain, null);
         self.vkd.destroyDevice(self.device, null);
 
         // Instance level cleanup
@@ -182,12 +167,14 @@ pub const App = struct {
         try self.vkd.deviceWaitIdle(self.device);
     }
 
-    fn initWindow() !glfw.Window {
+    fn initWindow(self: *Self) !void {
         _ = glfw.init(.{});
-        return glfw.Window.create(width, height, "Hello Vulkan from Zig!", null, null, .{
+        self.window = glfw.Window.create(width, height, "Hello Vulkan from Zig!", null, null, .{
             .client_api = Hints.ClientAPI.no_api,
-            .resizable = false,
         }).?;
+
+        self.window.setUserPointer(self);
+        self.window.setFramebufferSizeCallback(framebufferResizedCallback);
     }
 
     fn initVulkan(self: *Self) !void {
@@ -710,15 +697,56 @@ pub const App = struct {
         try self.vkd.endCommandBuffer(buffer);
     }
 
+    fn cleanupSwapchain(self: *Self) void {
+        for (self.swapchain_framebuffers) |framebuffer| {
+            self.vkd.destroyFramebuffer(self.device, framebuffer, null);
+        }
+
+        for (self.swapchain_image_views) |image_view| {
+            self.vkd.destroyImageView(self.device, image_view, null);
+        }
+
+        self.vkd.destroySwapchainKHR(self.device, self.swapchain, null);
+    }
+
+    fn recreateSwapchain(self: *Self) !void {
+        var size = self.window.getFramebufferSize();
+        while (size.width == 0 or size.height == 0) {
+            size = self.window.getFramebufferSize();
+            glfw.waitEvents();
+        }
+
+        try self.vkd.deviceWaitIdle(self.device);
+
+        self.cleanupSwapchain();
+
+        try self.createSwapChain();
+        try self.createImageViews();
+        try self.createFramebuffers();
+    }
+
     fn drawFrame(self: *Self) !void {
         var result = try self.vkd.waitForFences(self.device, 1, @ptrCast(&self.in_flight_fences[self.current_frame]), vk.TRUE, std.math.maxInt(u64));
         try VkAssert.withMessage(result, "Failed to wait for fences.");
 
+        const next_image = try self.vkd.acquireNextImageKHR(
+            self.device,
+            self.swapchain,
+            std.math.maxInt(u64),
+            self.image_available_semaphores[self.current_frame],
+            .null_handle,
+        );
+
+        switch (next_image.result) {
+            .error_out_of_date_khr => {
+                try self.recreateSwapchain();
+                return;
+            },
+            .success, .suboptimal_khr => {},
+            else => return error.FailedToAcquireSwapchainImage,
+        }
+
         try self.vkd.resetFences(self.device, 1, @ptrCast(&self.in_flight_fences[self.current_frame]));
-
-        const next_image = try self.vkd.acquireNextImageKHR(self.device, self.swapchain, std.math.maxInt(u64), self.image_available_semaphores[self.current_frame], .null_handle);
-        try VkAssert.withMessage(next_image.result, "Failed to acquire next image.");
-
         try self.vkd.resetCommandBuffer(self.command_buffers[self.current_frame], .{});
         try self.recordCommandBuffer(self.command_buffers[self.current_frame], next_image.image_index);
 
@@ -748,7 +776,14 @@ pub const App = struct {
         };
 
         result = try self.vkd.queuePresentKHR(self.present_queue, &present_info);
-        try VkAssert.withMessage(result, "Failed to submit the present queue.");
+        switch (result) {
+            .error_out_of_date_khr, .suboptimal_khr => {
+                self.framebuffer_resized = false;
+                try self.recreateSwapchain();
+            },
+            .success => {},
+            else => return error.FailedToPresentSwapchainImage,
+        }
 
         self.current_frame = (self.current_frame + 1) % max_frames_in_flight;
     }
@@ -997,6 +1032,15 @@ pub const App = struct {
         self.debug_messenger = try self.vki.createDebugUtilsMessengerEXT(self.instance, &create_info, null);
     }
 };
+
+fn framebufferResizedCallback(window: glfw.Window, w_width: u32, w_height: u32) void {
+    _ = w_width;
+    _ = w_height;
+
+    if (window.getUserPointer(App)) |app| {
+        app.framebuffer_resized = true;
+    }
+}
 
 fn createDebugMessengerCreateInfo() vk.DebugUtilsMessengerCreateInfoEXT {
     return .{

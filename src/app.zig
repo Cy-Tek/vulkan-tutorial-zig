@@ -168,10 +168,18 @@ pub const App = struct {
     }
 
     fn initWindow(self: *Self) !void {
-        _ = glfw.init(.{});
+        const success = glfw.init(.{});
+        if (!success) {
+            return error.FailedToInitGLFW;
+        }
+
         self.window = glfw.Window.create(width, height, "Hello Vulkan from Zig!", null, null, .{
             .client_api = Hints.ClientAPI.no_api,
         }).?;
+
+        if (!glfw.vulkanSupported()) {
+            return error.VulkanNotSupported;
+        }
 
         self.window.setUserPointer(self);
         self.window.setFramebufferSizeCallback(framebufferResizedCallback);

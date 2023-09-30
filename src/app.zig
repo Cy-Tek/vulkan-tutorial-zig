@@ -68,6 +68,38 @@ const SwapChainSupportDetails = struct {
     }
 };
 
+const Vertex = struct {
+    const binding_description: vk.VertexInputBindingDescription = .{
+        .binding = 0,
+        .stride = @sizeOf(Vertex),
+        .input_rate = .vertex,
+    };
+
+    const attribute_descriptions: [2]vk.VertexInputAttributeDescription = .{
+        .{
+            .binding = 0,
+            .location = 0,
+            .format = .r32g32_sfloat,
+            .offset = @offsetOf(Vertex, "pos"),
+        },
+        .{
+            .binding = 0,
+            .location = 1,
+            .format = .r32g32b32_sfloat,
+            .offset = @offsetOf(Vertex, "color"),
+        },
+    };
+
+    pos: [2]f32,
+    color: [3]f32,
+};
+
+const vertices = [_]Vertex{
+    .{ .pos = .{ 0.0, -0.5 }, .color = .{ 1.0, 0.0, 0.0 } },
+    .{ .pos = .{ 0.5, 0.5 }, .color = .{ 0.0, 1.0, 0.0 } },
+    .{ .pos = .{ -0.5, 0.5 }, .color = .{ 0.0, 0.0, 1.0 } },
+};
+
 pub const App = struct {
     const Self = @This();
 

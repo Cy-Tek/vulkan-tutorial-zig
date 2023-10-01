@@ -16,9 +16,6 @@ pub fn build(b: *std.Build) void {
     // set a preferred release mode, allowing the user to decide how to optimize.
     const optimize = b.standardOptimizeOption(.{});
 
-    const glfw_dep = b.dependency("mach_glfw", .{ .target = target, .optimize = optimize });
-    const glfw_mod = glfw_dep.module("mach-glfw");
-
     const exe = b.addExecutable(.{
         .name = "hello-triangle-zig-vulkan",
         // In this case the main source file is merely a path, however, in more
@@ -29,8 +26,12 @@ pub fn build(b: *std.Build) void {
     });
 
     exe.main_pkg_path = .{ .path = "." };
-    try glfw.link(b, exe);
-    exe.addModule("glfw", glfw_mod);
+    const glfw_dep = b.dependency("mach_glfw", .{
+        .target = exe.target,
+        .optimize = exe.optimize,
+    });
+    exe.addModule("glfw", glfw_dep.module("mach-glfw"));
+    try @import("mach_glfw").link(glfw_dep.builder, exe);
 
     // This declares intent for the executable to be installed into the
     // standard location when the user invokes the "install" step (the default

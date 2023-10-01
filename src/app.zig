@@ -212,7 +212,7 @@ pub const App = struct {
         }
 
         self.window = glfw.Window.create(width, height, "Hello Vulkan from Zig!", null, null, .{
-            .client_api = Hints.ClientAPI.no_api,
+            .client_api = .no_api,
         }).?;
 
         if (!glfw.vulkanSupported()) {
@@ -668,36 +668,53 @@ pub const App = struct {
         self.command_pool = try self.vkd.createCommandPool(self.device, &pool_info, null);
     }
 
-    fn createVertexBuffer(self: *Self) !void {
+    fn createBuffer(
+        self: *Self,
+        size: vk.DeviceSize,
+        usage: vk.BufferUsageFlags,
+        properties: vk.MemoryPropertyFlags,
+        buffer: *vk.Buffer,
+        buffer_memory: *vk.DeviceMemory,
+    ) !void {
         const buffer_info = vk.BufferCreateInfo{
-            .size = @sizeOf(Vertex) * vertices.len,
-            .usage = .{ .vertex_buffer_bit = true },
+            .size = size,
+            .usage = usage,
             .sharing_mode = .exclusive,
         };
 
-        self.vertex_buffer = try self.vkd.createBuffer(self.device, &buffer_info, null);
-        errdefer self.vkd.destroyBuffer(self.device, self.vertex_buffer, null);
+        buffer.* = try self.vkd.createBuffer(self.device, &buffer_info, null);
+        errdefer self.vkd.destroyBuffer(self.device, buffer.*, null);
 
-        const mem_requirements = self.vkd.getBufferMemoryRequirements(self.device, self.vertex_buffer);
+        const mem_requirements = self.vkd.getBufferMemoryRequirements(self.device, buffer.*);
         const alloc_info = vk.MemoryAllocateInfo{
             .allocation_size = mem_requirements.size,
             .memory_type_index = try self.findMemoryType(
                 mem_requirements.memory_type_bits,
-                .{
-                    .host_visible_bit = true,
-                    .host_coherent_bit = true,
-                },
+                properties,
             ),
         };
 
-        self.vertex_buffer_memory = try self.vkd.allocateMemory(self.device, &alloc_info, null);
-        errdefer self.vkd.freeMemory(self.device, self.vertex_buffer_memory, null);
+        buffer_memory.* = try self.vkd.allocateMemory(self.device, &alloc_info, null);
+        errdefer self.vkd.freeMemory(self.device, buffer_memory.*, null);
 
-        try self.vkd.bindBufferMemory(self.device, self.vertex_buffer, self.vertex_buffer_memory, 0);
+        try self.vkd.bindBufferMemory(self.device, buffer.*, buffer_memory.*, 0);
+    }
 
-        const data = try self.vkd.mapMemory(self.device, self.vertex_buffer_memory, 0, buffer_info.size, .{});
+    fn createVertexBuffer(self: *Self) !void {
+        const buffer_size = @sizeOf(Vertex) * vertices.len;
+        try self.createBuffer(
+            buffer_size,
+            .{ .vertex_buffer_bit = true },
+            .{
+                .host_visible_bit = true,
+                .host_coherent_bit = true,
+            },
+            &self.vertex_buffer,
+            &self.vertex_buffer_memory,
+        );
+
+        const data = try self.vkd.mapMemory(self.device, self.vertex_buffer_memory, 0, buffer_size, .{});
         if (data) |data_location| {
-            // const slice: []Vertex = @as([*]Vertex, @ptrCast(data_location))[0..buffer_info.size];
             @memcpy(@as([*]Vertex, @ptrCast(@alignCast(data_location))), &vertices);
         }
         self.vkd.unmapMemory(self.device, self.vertex_buffer_memory);

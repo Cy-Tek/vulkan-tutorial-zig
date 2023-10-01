@@ -762,9 +762,13 @@ pub const App = struct {
         self.vkd.cmdBeginRenderPass(buffer, &renderpass_info, .@"inline");
         self.vkd.cmdBindPipeline(buffer, .graphics, self.graphics_pipeline);
 
-        const vertex_buffers = [_]vk.Buffer{self.vertex_buffer};
-        const offsets = [_]vk.DeviceSize{0};
-        self.vkd.cmdBindVertexBuffers(buffer, 0, 1, &vertex_buffers, &offsets);
+        self.vkd.cmdBindVertexBuffers(
+            buffer,
+            0,
+            1,
+            @ptrCast(&.{self.vertex_buffer}),
+            @ptrCast(&.{0}),
+        );
 
         const viewport = vk.Viewport{
             .x = 0.0,

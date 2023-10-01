@@ -140,6 +140,9 @@ pub const App = struct {
     current_frame: u8 = 0,
     framebuffer_resized: bool = false,
 
+    vertex_buffer: vk.Buffer = .null_handle,
+    vertex_buffer_memory: vk.DeviceMemory = .null_handle,
+
     pub fn init(alloc: Allocator) !App {
         var app = App{
             .allocator = alloc,
@@ -157,6 +160,9 @@ pub const App = struct {
 
     pub fn deinit(self: *Self) void {
         // Device level cleanup
+
+        self.vkd.destroyBuffer(self.device, self.vertex_buffer, null);
+        self.vkd.freeMemory(self.device, self.vertex_buffer_memory, null);
 
         for (0..max_frames_in_flight) |i| {
             self.vkd.destroySemaphore(self.device, self.image_available_semaphores[i], null);
@@ -236,6 +242,7 @@ pub const App = struct {
         try self.createGraphicsPipeline();
         try self.createFramebuffers();
         try self.createCommandPool();
+        try self.createVertexBuffer();
         try self.createCommandBuffers();
         try self.createSyncObjects();
     }
@@ -506,9 +513,14 @@ pub const App = struct {
 
         var shader_stages = [_]vk.PipelineShaderStageCreateInfo{ vert_shader_stage_info, frag_shader_stage_info };
 
+        const binding_description = Vertex.binding_description;
+        const attribute_descriptions = Vertex.attribute_descriptions;
+
         const vertex_input_info = vk.PipelineVertexInputStateCreateInfo{
-            .vertex_binding_description_count = 0,
-            .vertex_attribute_description_count = 0,
+            .vertex_binding_description_count = 1,
+            .p_vertex_binding_descriptions = @ptrCast(&binding_description),
+            .vertex_attribute_description_count = @intCast(attribute_descriptions.len),
+            .p_vertex_attribute_descriptions = &attribute_descriptions,
         };
 
         const input_assembly = vk.PipelineInputAssemblyStateCreateInfo{
@@ -656,6 +668,41 @@ pub const App = struct {
         self.command_pool = try self.vkd.createCommandPool(self.device, &pool_info, null);
     }
 
+    fn createVertexBuffer(self: *Self) !void {
+        const buffer_info = vk.BufferCreateInfo{
+            .size = @sizeOf(Vertex) * vertices.len,
+            .usage = .{ .vertex_buffer_bit = true },
+            .sharing_mode = .exclusive,
+        };
+
+        self.vertex_buffer = try self.vkd.createBuffer(self.device, &buffer_info, null);
+        errdefer self.vkd.destroyBuffer(self.device, self.vertex_buffer, null);
+
+        const mem_requirements = self.vkd.getBufferMemoryRequirements(self.device, self.vertex_buffer);
+        const alloc_info = vk.MemoryAllocateInfo{
+            .allocation_size = mem_requirements.size,
+            .memory_type_index = try self.findMemoryType(
+                mem_requirements.memory_type_bits,
+                .{
+                    .host_visible_bit = true,
+                    .host_coherent_bit = true,
+                },
+            ),
+        };
+
+        self.vertex_buffer_memory = try self.vkd.allocateMemory(self.device, &alloc_info, null);
+        errdefer self.vkd.freeMemory(self.device, self.vertex_buffer_memory, null);
+
+        try self.vkd.bindBufferMemory(self.device, self.vertex_buffer, self.vertex_buffer_memory, 0);
+
+        const data = try self.vkd.mapMemory(self.device, self.vertex_buffer_memory, 0, buffer_info.size, .{});
+        if (data) |data_location| {
+            // const slice: []Vertex = @as([*]Vertex, @ptrCast(data_location))[0..buffer_info.size];
+            @memcpy(@as([*]Vertex, @ptrCast(@alignCast(data_location))), &vertices);
+        }
+        self.vkd.unmapMemory(self.device, self.vertex_buffer_memory);
+    }
+
     fn createCommandBuffers(self: *Self) !void {
         const buffer_count = max_frames_in_flight;
         const alloc_info = vk.CommandBufferAllocateInfo{
@@ -715,6 +762,10 @@ pub const App = struct {
         self.vkd.cmdBeginRenderPass(buffer, &renderpass_info, .@"inline");
         self.vkd.cmdBindPipeline(buffer, .graphics, self.graphics_pipeline);
 
+        const vertex_buffers = [_]vk.Buffer{self.vertex_buffer};
+        const offsets = [_]vk.DeviceSize{0};
+        self.vkd.cmdBindVertexBuffers(buffer, 0, 1, &vertex_buffers, &offsets);
+
         const viewport = vk.Viewport{
             .x = 0.0,
             .y = 0.0,
@@ -731,7 +782,7 @@ pub const App = struct {
         };
         self.vkd.cmdSetScissor(buffer, 0, 1, @ptrCast(&scissor));
 
-        self.vkd.cmdDraw(buffer, 3, 1, 0, 0);
+        self.vkd.cmdDraw(buffer, @intCast(vertices.len), 1, 0, 0);
 
         self.vkd.cmdEndRenderPass(buffer);
         try self.vkd.endCommandBuffer(buffer);
@@ -826,6 +877,20 @@ pub const App = struct {
         }
 
         self.current_frame = (self.current_frame + 1) % max_frames_in_flight;
+    }
+
+    fn findMemoryType(self: *Self, type_filter: u32, properties: vk.MemoryPropertyFlags) !u32 {
+        const mem_properties = self.vki.getPhysicalDeviceMemoryProperties(self.physical_device);
+        for (0..mem_properties.memory_type_count) |i| {
+            const mask = @as(u32, @intCast(i)) << @intCast(i);
+            if (type_filter & mask == mask and
+                mem_properties.memory_types[i].property_flags.contains(properties))
+            {
+                return @intCast(i);
+            }
+        }
+
+        return error.NoValidMemoryType;
     }
 
     fn createShaderModule(self: *Self, code: []const u8) !vk.ShaderModule {

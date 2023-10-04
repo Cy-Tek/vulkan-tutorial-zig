@@ -702,22 +702,78 @@ pub const App = struct {
 
     fn createVertexBuffer(self: *Self) !void {
         const buffer_size = @sizeOf(Vertex) * vertices.len;
+        var staging_buffer: vk.Buffer = .null_handle;
+        var staging_buffer_memory: vk.DeviceMemory = .null_handle;
         try self.createBuffer(
             buffer_size,
-            .{ .vertex_buffer_bit = true },
+            vk.BufferUsageFlags{ .transfer_src_bit = true },
             .{
                 .host_visible_bit = true,
                 .host_coherent_bit = true,
+            },
+            &staging_buffer,
+            &staging_buffer_memory,
+        );
+
+        const data = try self.vkd.mapMemory(self.device, staging_buffer_memory, 0, buffer_size, .{});
+        if (data) |data_location| {
+            @memcpy(@as([*]Vertex, @ptrCast(@alignCast(data_location))), &vertices);
+        }
+        self.vkd.unmapMemory(self.device, staging_buffer_memory);
+
+        try self.createBuffer(
+            buffer_size,
+            vk.BufferUsageFlags{
+                .transfer_dst_bit = true,
+                .vertex_buffer_bit = true,
+            },
+            vk.MemoryPropertyFlags{
+                .device_local_bit = true,
             },
             &self.vertex_buffer,
             &self.vertex_buffer_memory,
         );
 
-        const data = try self.vkd.mapMemory(self.device, self.vertex_buffer_memory, 0, buffer_size, .{});
-        if (data) |data_location| {
-            @memcpy(@as([*]Vertex, @ptrCast(@alignCast(data_location))), &vertices);
-        }
-        self.vkd.unmapMemory(self.device, self.vertex_buffer_memory);
+        try self.copyBuffer(staging_buffer, self.vertex_buffer, buffer_size);
+
+        self.vkd.destroyBuffer(self.device, staging_buffer, null);
+        self.vkd.freeMemory(self.device, staging_buffer_memory, null);
+    }
+
+    fn copyBuffer(self: *Self, src: vk.Buffer, dst: vk.Buffer, size: vk.DeviceSize) !void {
+        const alloc_info = vk.CommandBufferAllocateInfo{
+            .level = .primary,
+            .command_pool = self.command_pool,
+            .command_buffer_count = 1,
+        };
+
+        var command_buffer: vk.CommandBuffer = undefined;
+        try self.vkd.allocateCommandBuffers(self.device, &alloc_info, @ptrCast(&command_buffer));
+
+        const begin_info = vk.CommandBufferBeginInfo{
+            .flags = vk.CommandBufferUsageFlags{ .one_time_submit_bit = true },
+        };
+
+        try self.vkd.beginCommandBuffer(command_buffer, &begin_info);
+
+        const copy_region = vk.BufferCopy{
+            .size = size,
+            .src_offset = 0,
+            .dst_offset = 0,
+        };
+
+        self.vkd.cmdCopyBuffer(command_buffer, src, dst, 1, @ptrCast(&copy_region));
+        try self.vkd.endCommandBuffer(command_buffer);
+
+        const submit_info = vk.SubmitInfo{
+            .command_buffer_count = 1,
+            .p_command_buffers = @ptrCast(&command_buffer),
+        };
+
+        try self.vkd.queueSubmit(self.graphics_queue, 1, @ptrCast(&submit_info), .null_handle);
+        try self.vkd.queueWaitIdle(self.graphics_queue);
+
+        self.vkd.freeCommandBuffers(self.device, self.command_pool, 1, @ptrCast(&command_buffer));
     }
 
     fn createCommandBuffers(self: *Self) !void {
